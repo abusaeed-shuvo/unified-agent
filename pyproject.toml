@@ -23,6 +23,7 @@ dependencies = [
     "sqlalchemy>=2.0.0",
     "httpx",
     "python-dotenv",
+    "pydantic-settings>=2.14.2",
 ]
 
 [project.optional-dependencies]
