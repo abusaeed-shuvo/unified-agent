@@ -1,0 +1,5 @@
+{
+	"allow_tools": ["calculator"],
+	"max_response_tokens": 800,
+	"forbidden_topics": []
+}
