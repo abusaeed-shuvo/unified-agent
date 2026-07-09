@@ -28,8 +28,6 @@ dependencies = [
 [project.optional-dependencies]
 discord = ["discord.py"]
 web = ["fastapi", "uvicorn"]
-
-[dependency-groups]
 dev = ["pytest", "pytest-asyncio", "ruff"]
 
 [tool.hatch.build.targets.wheel]

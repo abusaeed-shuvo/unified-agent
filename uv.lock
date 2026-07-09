@@ -957,6 +957,11 @@ dependencies = [
 ]
 
 [package.optional-dependencies]
+dev = [
+    { name = "pytest" },
+    { name = "pytest-asyncio" },
+    { name = "ruff" },
+]
 discord = [
     { name = "discord-py" },
 ]
@@ -965,29 +970,18 @@ web = [
     { name = "uvicorn" },
 ]
 
-[package.dev-dependencies]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
-]
-
 [package.metadata]
 requires-dist = [
     { name = "discord-py", marker = "extra == 'discord'" },
     { name = "fastapi", marker = "extra == 'web'" },
     { name = "httpx" },
     { name = "pydantic", specifier = ">=2.0.0" },
+    { name = "pytest", marker = "extra == 'dev'" },
+    { name = "pytest-asyncio", marker = "extra == 'dev'" },
     { name = "python-dotenv" },
+    { name = "ruff", marker = "extra == 'dev'" },
     { name = "sqlalchemy", specifier = ">=2.0.0" },
     { name = "uvicorn", marker = "extra == 'web'" },
-]
-
-[package.metadata.requires-dev]
-dev = [
-    { name = "pytest" },
-    { name = "pytest-asyncio" },
-    { name = "ruff" },
 ]
 
 [[package]]
