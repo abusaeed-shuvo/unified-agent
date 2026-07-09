@@ -28,12 +28,8 @@ class User(Base):
     )
 
     # Relationships
-    sessions: Mapped[list["Session"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
-    )
-    facts: Mapped[list["Fact"]] = relationship(
-        back_populates="user", cascade="all, delete-orphan"
-    )
+    sessions: Mapped[list["Session"]] = relationship(back_populates="user")
+    facts: Mapped[list["Fact"]] = relationship(back_populates="user")
 
 
 class Session(Base):
@@ -48,9 +44,7 @@ class Session(Base):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="sessions")
-    messages: Mapped[list["Message"]] = relationship(
-        back_populates="session", cascade="all, delete-orphan"
-    )
+    messages: Mapped[list["Message"]] = relationship(back_populates="session")
 
 
 class Message(Base):
