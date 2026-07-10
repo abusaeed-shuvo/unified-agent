@@ -35,6 +35,7 @@ class FakeAdapter(LLMAdapter):
             self._fixed = None
             self._responses = None
         self._index = 0
+        self._call_count = 0  # Track number of generate() calls
 
     async def generate(
         self,
@@ -42,6 +43,7 @@ class FakeAdapter(LLMAdapter):
         tools: list[dict] | None = None,
         **kwargs,
     ) -> LLMResponse:
+        self._call_count += 1
         if self._fixed is not None:
             return self._fixed
 

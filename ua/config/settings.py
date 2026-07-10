@@ -13,6 +13,7 @@ class Settings(BaseSettings):
     discord_token: str | None = None
     log_level: str = "INFO"
     tools_allow_destructive: bool = False
+    max_tool_call_rounds: int = 3
 
     model_config = SettingsConfigDict(env_prefix="UA_", env_file=".env")
 

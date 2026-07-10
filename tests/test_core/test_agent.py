@@ -9,6 +9,7 @@ import pytest
 import pytest_asyncio
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
+from ua.config.settings import Settings
 from ua.conversation.context_builder import ContextBuilder
 from ua.conversation.manager import ConversationManager
 from ua.core.agent import UnifiedAgent
@@ -90,10 +91,13 @@ def _build_test_agent(
     context_builder,
     tool_registry,
     fake_adapter,
+    settings: Settings | None = None,
 ):
     """Build a UnifiedAgent with a ModelManager that uses the given FakeAdapter."""
     # Create a ModelManager with fake provider, then swap in our custom adapter
-    model_manager = ModelManager()
+    if settings is None:
+        settings = Settings()
+    model_manager = ModelManager(settings=settings)
     model_manager._adapter = fake_adapter
     return UnifiedAgent(
         conversation=conversation_manager,
@@ -303,3 +307,201 @@ async def test_build_default_agent_uses_settings():
 
         # With fake provider, it echoes the last user message
         assert "Hello from factory!" in response
+
+
+# ---------------------------------------------------------------------------
+# Batch 25 Tests: Bounded tool call loop
+# ---------------------------------------------------------------------------
+
+@pytest.mark.asyncio
+async def test_chat_resolves_multiple_chained_tool_call_rounds(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """FakeAdapter with 3 tool-call responses then final text: all 3 rounds resolve."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # Three responses with tool calls, then final text
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calculator", arguments={"expression": "1+1"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="calculator", arguments={"expression": "2+2"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c3", name="calculator", arguments={"expression": "3+3"})],
+        ),
+        LLMResponse(content="All done!"),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    settings = Settings(max_tool_call_rounds=4)  # Allow enough rounds
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    response = await agent.chat(
+        user_id="test_user_chained",
+        platform="test",
+        message="Do some math",
+    )
+
+    # Should get the final text after all tool calls
+    assert response == "All done!"
+    # Verify exactly 4 generate() calls were made
+    assert fake._call_count == 4
+
+
+@pytest.mark.asyncio
+async def test_chat_stops_at_max_rounds_when_model_keeps_requesting_tools(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """FakeAdapter with more tool-call responses than max_tool_call_rounds: stops at limit."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # Four responses all with tool calls, but max_rounds=2
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calculator", arguments={"expression": "1+1"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="calculator", arguments={"expression": "2+2"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c3", name="calculator", arguments={"expression": "3+3"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c4", name="calculator", arguments={"expression": "4+4"})],
+        ),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    settings = Settings(max_tool_call_rounds=2)
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    response = await agent.chat(
+        user_id="test_user_max_rounds",
+        platform="test",
+        message="Do some math",
+    )
+
+    # Should stop at exactly 2 generate() calls
+    assert fake._call_count == 2
+    # Response should be the content from the 2nd response (empty) or fallback
+    assert response == "I wasn't able to complete that request."
+
+
+@pytest.mark.asyncio
+async def test_chat_logs_warning_when_round_limit_hit(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+    caplog,
+):
+    """Verify a warning is logged when the round limit is hit."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # Two tool-call responses, but max_rounds=1
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calculator", arguments={"expression": "1+1"})],
+        ),
+        LLMResponse(content="This should not be reached"),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    settings = Settings(max_tool_call_rounds=1)
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    with caplog.at_level("WARNING"):
+        response = await agent.chat(
+            user_id="test_user_warning",
+            platform="test",
+            message="Do some math",
+        )
+
+    # Should have logged a warning
+    assert any("Tool call round limit" in record.message for record in caplog.records)
+    # Response should be fallback since content was empty
+    assert response == "I wasn't able to complete that request."
+
+
+@pytest.mark.asyncio
+async def test_chat_at_round_limit_does_not_raise_exception(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """Verify chat() does not raise an exception when round limit is hit."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # Multiple tool-call responses, but max_rounds=2
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calculator", arguments={"expression": "1+1"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="calculator", arguments={"expression": "2+2"})],
+        ),
+        LLMResponse(content="This should not be reached"),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    settings = Settings(max_tool_call_rounds=2)
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    # This must not raise an exception
+    try:
+        response = await agent.chat(
+            user_id="test_user_no_exception",
+            platform="test",
+            message="Do some math",
+        )
+        # If we get here, no exception was raised
+        assert isinstance(response, str)
+    except Exception as e:
+        pytest.fail(f"chat() raised an exception when it should not: {e}")

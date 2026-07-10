@@ -1,12 +1,13 @@
 """UnifiedAgent — the single public entrypoint for the full chat pipeline.
 
 Orchestrates: ConversationManager → ContextBuilder → ModelManager →
-(optional single round of tool execution via ToolRegistry) →
+(optional multiple rounds of tool execution via ToolRegistry) →
 ConversationManager again → return final text.
 """
 
 from __future__ import annotations
 
+from ua.config.logging import get_logger
 from ua.conversation.context_builder import ContextBuilder
 from ua.conversation.manager import ConversationManager
 from ua.database.engine import init_db
@@ -45,6 +46,7 @@ class UnifiedAgent:
         self._tool_registry = tool_registry
         self._personality_name = personality_name
         self._db_initialized = False
+        self._logger = get_logger(__name__)
 
     async def chat(self, user_id: str, platform: str, message: str) -> str:
         """Process a user message through the full chat pipeline.
@@ -52,16 +54,14 @@ class UnifiedAgent:
         Steps:
         1. context = await conversation.handle_incoming(user_id, platform, message)
         2. messages = context_builder.build(personality_name, context, message)
-        3. response = await model_manager.generate(messages, tools=...)
-        4. IF response.tool_calls is non-empty:
-             - Execute each tool call (catching ToolNotFoundError per call).
-             - Append tool results as tool-role messages.
-             - Call model_manager.generate() AGAIN (one follow-up round).
-             - Use the SECOND response's .content as the final text.
-           ELSE:
-             - Use the FIRST response's .content as the final text.
-        5. await conversation.handle_outgoing(user_id, platform, final_text)
-        6. return final_text
+        3. Loop: call model_manager.generate(messages, tools=...) up to
+           max_tool_call_rounds times. If response.tool_calls is non-empty,
+           execute each tool call and append results, then loop again.
+           If tool_calls is empty, use that response's .content as final.
+           If max rounds hit while still having tool_calls, use the last
+           response's .content (or fallback string) and log a warning.
+        4. await conversation.handle_outgoing(user_id, platform, final_text)
+        5. return final_text
 
         Args:
             user_id: The user identifier.
@@ -87,15 +87,23 @@ class UnifiedAgent:
         # Step 3: Get tool schemas from the registry
         tool_schemas = self._tool_registry.all_schemas()
 
-        # Step 4: First LLM call
-        first_response = await self._model_manager.generate(
-            messages, tools=tool_schemas
-        )
+        # Step 4: Bounded loop for tool calls
+        max_rounds = self._model_manager._settings.max_tool_call_rounds
+        round_count = 0
+        response = None
 
-        # Step 5: Handle tool calls if present
-        if first_response.tool_calls:
+        while round_count < max_rounds:
+            round_count += 1
+            response = await self._model_manager.generate(
+                messages, tools=tool_schemas
+            )
+
+            # If no tool calls, we're done
+            if not response.tool_calls:
+                break
+
             # Execute each tool call and append results
-            for tc in first_response.tool_calls:
+            for tc in response.tool_calls:
                 tool_result = await self._execute_tool_safely(tc)
                 messages.append(
                     Message(
@@ -105,13 +113,17 @@ class UnifiedAgent:
                     )
                 )
 
-            # One follow-up round with tool results included
-            second_response = await self._model_manager.generate(
-                messages, tools=tool_schemas
+        # Step 5: Handle round limit hit with tool_calls still pending
+        if response.tool_calls:
+            # Model still wants tools but we hit the limit
+            self._logger.warning(
+                f"Tool call round limit ({max_rounds}) reached; "
+                f"model still has {len(response.tool_calls)} pending tool call(s). "
+                f"Returning last response content or fallback."
             )
-            final_text = second_response.content
+            final_text = response.content or "I wasn't able to complete that request."
         else:
-            final_text = first_response.content
+            final_text = response.content
 
         # Step 6: Handle outgoing (record assistant turn)
         await self._conversation.handle_outgoing(user_id, platform, final_text)

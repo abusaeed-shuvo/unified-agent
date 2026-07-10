@@ -190,3 +190,6 @@ lightning_logs/
 
 # Manual test scripts (not to be committed)
 manual_test_*.py
+
+# Cline system files
+.clinerule
