@@ -32,6 +32,9 @@ discord = ["discord.py"]
 web = ["fastapi", "uvicorn"]
 dev = ["pytest", "pytest-asyncio", "ruff"]
 
+[project.scripts]
+unified-agent-cli = "ua.interfaces.cli.main:run"
+
 [tool.hatch.build.targets.wheel]
 packages = ["ua"]
 
