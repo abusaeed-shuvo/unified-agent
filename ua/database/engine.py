@@ -6,6 +6,7 @@ from sqlalchemy.ext.asyncio import (  # noqa: E501
     async_sessionmaker,
     create_async_engine,
 )
+from sqlalchemy.pool import StaticPool
 
 from ua.config.settings import get_settings
 
@@ -14,11 +15,25 @@ _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
 def get_engine() -> AsyncEngine:
-    """Create (or return a cached) async engine using settings.database_url."""
+    """Create (or return a cached) async engine using settings.database_url.
+
+    For sqlite+aiosqlite:///:memory: URLs, uses StaticPool to ensure all
+    connections share the same in-memory database. Without this, each new
+    connection would get its own separate :memory: database.
+    """
     global _engine
     if _engine is None:
         settings = get_settings()
-        _engine = create_async_engine(settings.database_url)
+        url = settings.database_url
+        # Use StaticPool for in-memory SQLite so all connections share one DB
+        if "aiosqlite" in url and ":memory:" in url:
+            _engine = create_async_engine(
+                url,
+                poolclass=StaticPool,
+                connect_args={"check_same_thread": False},
+            )
+        else:
+            _engine = create_async_engine(url)
     return _engine
 
 
