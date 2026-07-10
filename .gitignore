@@ -171,8 +171,8 @@ dmypy.json
 cython_debug/
 
 # AI/ML specific
-/models/
-/checkpoints/
+/.models/
+/.checkpoints/
 *.pt
 *.pth
 *.h5
@@ -187,3 +187,6 @@ wandb/
 mlruns/
 runs/
 lightning_logs/
+
+# Manual test scripts (not to be committed)
+manual_test_*.py
