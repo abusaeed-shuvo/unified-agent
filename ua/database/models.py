@@ -30,6 +30,7 @@ class User(Base):
     # Relationships
     sessions: Mapped[list["Session"]] = relationship(back_populates="user")
     facts: Mapped[list["Fact"]] = relationship(back_populates="user")
+    documents: Mapped[list["KnowledgeDocument"]] = relationship(back_populates="user")
 
 
 class Session(Base):
@@ -75,3 +76,18 @@ class Fact(Base):
 
     # Relationships
     user: Mapped["User"] = relationship(back_populates="facts")
+
+
+class KnowledgeDocument(Base):
+    __tablename__ = "knowledge_documents"
+
+    id: Mapped[str] = mapped_column(String, primary_key=True, default=_uuid)
+    user_id: Mapped[str] = mapped_column(ForeignKey("users.id"), nullable=False)
+    title: Mapped[str] = mapped_column(String, nullable=False)
+    content: Mapped[str] = mapped_column(String, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), default=_utcnow
+    )
+
+    # Relationships
+    user: Mapped["User"] = relationship(back_populates="documents")
