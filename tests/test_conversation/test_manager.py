@@ -252,7 +252,7 @@ async def test_user_creation_with_external_id(conversation_manager, session_fact
 
 
 @pytest.mark.asyncio
-async def test_multiple_platforms_create_separate_sessions_and_users(
+async def test_multiple_platforms_create_separate_sessions_shared_user(
     conversation_manager, session_factory
 ):
     """Test that multiple platforms create separate sessions but share the same User row."""
