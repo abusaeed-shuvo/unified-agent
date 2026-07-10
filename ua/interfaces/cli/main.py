@@ -29,7 +29,7 @@ def run() -> None:
     async def main_async_loop() -> None:
         """Async loop that handles stdin reading and agent chat calls."""
         agent = build_default_agent()
-        print("Unified Agent CLI ready. Type 'exit' or press Ctrl+D to quit.")
+        print("Unified Agent CLI ready. Press Ctrl+D or enter an empty line to quit.")
 
         while True:
             try:
