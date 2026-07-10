@@ -33,7 +33,10 @@ class LLMResponse:
 
 
 class LLMAdapterError(Exception):
-    """Raised by adapters on transient failures (timeouts, connection errors, malformed responses)."""
+    """Raised by adapters on transient failures.
+
+    Covers timeouts, connection errors, and malformed responses.
+    """
 
 
 class LLMAdapter(ABC):
