@@ -13,18 +13,13 @@ Unified Agent is a Python library that implements a complete AI conversation pip
 - **Pluggable LLM providers**: Works with LM Studio, Ollama, OpenAI-compatible APIs, or a fake provider for testing
 - **Built-in tools**: Calculator and filesystem tools for agent capabilities
 
-## Installation
+## Installation (from source)
 
 ```bash
-# Install with uv (recommended)
-uv pip install unified-agent
-
-# Or with pip
-pip install unified-agent
-
-# Install with extras for specific interfaces
-uv pip install "unified-agent[discord]"  # For Discord bot
-uv pip install "unified-agent[web]"      # For Web API
+# Clone and install in editable mode
+git clone <repo-url>
+cd unified-agent
+uv sync --extra dev  # Includes test dependencies
 ```
 
 ## Quick Start: CLI Chat
@@ -45,9 +40,6 @@ Once the CLI starts, type messages and press Enter:
 ```
 You: Hello!
 Agent: echo: Hello!
-
-You: What is 2 + 2?
-Agent: echo: What is 2 + 2?
 ```
 
 Press Ctrl+D or enter an empty line to exit.
@@ -58,12 +50,13 @@ Unified Agent is configured via environment variables:
 
 | Variable | Required | Default | Description |
 |----------|----------|---------|-------------|
-| `UA_LLM_PROVIDER` | No | `lmstudio` | LLM provider: `lmstudio`, `ollama`, `openai_compat`, or `fake` |
+| `UA_LLM_PROVIDER` | No | `fake` | LLM provider: `lmstudio`, `ollama`, `openai_compat`, or `fake` |
 | `UA_LLM_BASE_URL` | Depends | Provider-specific | Base URL for LM Studio or Ollama |
 | `UA_LLM_MODEL` | Depends | Provider-specific | Model name to use |
-| `UA_LLM_API_KEY` | For OpenAI | - | API key for OpenAI-compatible providers |
 | `UA_DATABASE_URL` | No | `sqlite+aiosqlite:///./unified_agent.db` | SQLAlchemy database URL |
 | `UA_DISCORD_TOKEN` | For Discord | - | Discord bot token |
+
+> **Note**: The `fake` provider is the default, so no configuration is required for testing. The default database path creates `unified_agent.db` in the current directory, so in-memory is recommended for testing.
 
 ## Interfaces
 
@@ -77,7 +70,8 @@ uv run unified-agent-cli
 
 ```bash
 export UA_LLM_PROVIDER=fake
-uv run python -m ua.interfaces.web.api
+export UA_DATABASE_URL="sqlite+aiosqlite:///:memory:"
+uv run uvicorn ua.interfaces.web.api:app --port 8000
 # Then POST to http://localhost:8000/chat
 ```
 
@@ -86,7 +80,7 @@ uv run python -m ua.interfaces.web.api
 ```bash
 export UA_LLM_PROVIDER=fake
 export UA_DISCORD_TOKEN=your_token_here
-uv run python -m ua.interfaces.discord
+uv run python -c "from ua.interfaces.discord.bot import run; run()"
 ```
 
 ## Project Structure
@@ -119,9 +113,6 @@ unified-agent/
 ## Development
 
 ```bash
-# Install dev dependencies
-uv sync --extra dev
-
 # Run tests
 uv run pytest
 
