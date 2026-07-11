@@ -1,11 +1,16 @@
 """ModelManager — single entrypoint for LLM provider selection."""
 
+import asyncio
+
+from ua.config.logging import get_logger
 from ua.config.settings import Settings, get_settings
-from ua.models.base import LLMAdapter, LLMResponse, Message
+from ua.models.base import LLMAdapter, LLMAdapterError, LLMResponse, Message
 from ua.models.fake_adapter import FakeAdapter
 from ua.models.lmstudio_adapter import LMStudioAdapter
 from ua.models.ollama_adapter import OllamaAdapter
 from ua.models.openai_compat_adapter import OpenAICompatAdapter
+
+logger = get_logger(__name__)
 
 
 class ModelManager:
@@ -73,5 +78,26 @@ class ModelManager:
         tools: list[dict] | None = None,
         **kwargs,
     ) -> LLMResponse:
-        """Delegate to the configured adapter's generate method."""
-        return await self._adapter.generate(messages, tools=tools, **kwargs)
+        """
+        Delegate to the configured adapter's generate method with retry logic.
+
+        Retries on LLMAdapterError (transient failures) using linear backoff.
+        Total attempts = llm_max_retries + 1 (e.g., max_retries=2 means 3 total attempts).
+        """
+        max_retries = self._settings.llm_max_retries
+        backoff_seconds = self._settings.llm_retry_backoff_seconds
+
+        for attempt in range(max_retries + 1):
+            try:
+                return await self._adapter.generate(messages, tools=tools, **kwargs)
+            except LLMAdapterError as e:
+                if attempt == max_retries:
+                    # Final attempt failed, propagate the error
+                    raise
+                # Log the retry attempt
+                logger.warning(
+                    f"LLM adapter error on attempt {attempt + 1}, retrying: {e}"
+                )
+                # Linear backoff: backoff_seconds * (attempt + 1)
+                # attempt is 0-indexed, so we use (attempt + 1) for backoff multiplier
+                await asyncio.sleep(backoff_seconds * (attempt + 1))

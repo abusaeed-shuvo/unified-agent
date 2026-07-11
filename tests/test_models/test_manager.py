@@ -3,7 +3,7 @@
 import pytest
 
 from ua.config.settings import Settings, get_settings
-from ua.models.base import Message
+from ua.models.base import LLMAdapter, LLMAdapterError, LLMResponse, Message
 from ua.models.fake_adapter import FakeAdapter
 from ua.models.lmstudio_adapter import LMStudioAdapter
 from ua.models.manager import ModelManager
@@ -88,3 +88,120 @@ class TestModelManager:
             assert isinstance(mgr._adapter_instance, FakeAdapter)
         finally:
             get_settings.cache_clear()
+
+
+class TestModelManagerRetry:
+    """Tests for retry logic in ModelManager.generate()."""
+
+    @pytest.mark.asyncio
+    async def test_retries_on_transient_llm_adapter_error_then_succeeds(self):
+        """Retry on LLMAdapterError succeeds after retries (3 total attempts)."""
+
+        class FlakyAdapter(LLMAdapter):
+            def __init__(self):
+                self.call_count = 0
+
+            async def generate(self, messages, tools=None, **kwargs):
+                self.call_count += 1
+                if self.call_count < 3:
+                    msg = f"Simulated transient failure on attempt {self.call_count}"
+                    raise LLMAdapterError(msg)
+                return LLMResponse(content="Success after retries", tool_calls=[])
+
+        flaky = FlakyAdapter()
+        settings = Settings(
+            llm_provider="fake",
+            llm_max_retries=2,
+            llm_retry_backoff_seconds=0.01,
+        )
+        mgr = ModelManager(settings=settings)
+        mgr._adapter = flaky
+        response = await mgr.generate([Message(role="user", content="test")])
+
+        assert response.content == "Success after retries"
+        assert flaky.call_count == 3  # 2 retries + 1 initial = 3 total attempts
+
+    @pytest.mark.asyncio
+    async def test_raises_llm_adapter_error_after_exhausting_all_retries(self):
+        """LLMAdapterError propagates after all retries exhausted (3 total attempts)."""
+
+        class AlwaysFailAdapter(LLMAdapter):
+            def __init__(self):
+                self.call_count = 0
+
+            async def generate(self, messages, tools=None, **kwargs):
+                self.call_count += 1
+                raise LLMAdapterError(f"Always fails on attempt {self.call_count}")
+
+        always_fail = AlwaysFailAdapter()
+        settings = Settings(
+            llm_provider="fake",
+            llm_max_retries=2,
+            llm_retry_backoff_seconds=0.01,
+        )
+        mgr = ModelManager(settings=settings)
+        mgr._adapter = always_fail
+
+        with pytest.raises(LLMAdapterError):
+            await mgr.generate([Message(role="user", content="test")])
+
+        assert always_fail.call_count == 3  # 2 retries + 1 initial = 3 total attempts
+
+    @pytest.mark.asyncio
+    async def test_does_not_retry_on_non_llm_adapter_error_exception_type(self):
+        """Non-LLMAdapterError exceptions propagate immediately without retry."""
+
+        class TypeErrorAdapter(LLMAdapter):
+            def __init__(self):
+                self.call_count = 0
+
+            async def generate(self, messages, tools=None, **kwargs):
+                self.call_count += 1
+                raise TypeError("Non-transient error")
+
+        type_error = TypeErrorAdapter()
+        settings = Settings(
+            llm_provider="fake",
+            llm_max_retries=2,
+            llm_retry_backoff_seconds=0.01,
+        )
+        mgr = ModelManager(settings=settings)
+        mgr._adapter = type_error
+
+        with pytest.raises(TypeError):
+            await mgr.generate([Message(role="user", content="test")])
+
+        assert type_error.call_count == 1  # No retry, only 1 call
+
+    @pytest.mark.asyncio
+    async def test_retry_attempts_are_logged_as_warnings(self, caplog):
+        """Each retry attempt logs a WARNING message."""
+
+        class FlakyAdapter(LLMAdapter):
+            def __init__(self):
+                self.call_count = 0
+
+            async def generate(self, messages, tools=None, **kwargs):
+                self.call_count += 1
+                if self.call_count < 3:
+                    raise LLMAdapterError(f"Transient failure {self.call_count}")
+                return LLMResponse(content="Success", tool_calls=[])
+
+        flaky = FlakyAdapter()
+        settings = Settings(
+            llm_provider="fake",
+            llm_max_retries=2,
+            llm_retry_backoff_seconds=0.01,
+        )
+        mgr = ModelManager(settings=settings)
+        mgr._adapter = flaky
+
+        with caplog.at_level("WARNING"):
+            response = await mgr.generate([Message(role="user", content="test")])
+
+        assert response.content == "Success"
+        # Should have 2 warning logs (one for each retry attempt)
+        assert len(caplog.records) == 2
+        assert all(r.levelname == "WARNING" for r in caplog.records)
+        assert "attempt 1" in caplog.records[0].message
+        assert "attempt 2" in caplog.records[1].message

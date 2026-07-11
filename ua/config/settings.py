@@ -14,6 +14,8 @@ class Settings(BaseSettings):
     log_level: str = "INFO"
     tools_allow_destructive: bool = False
     max_tool_call_rounds: int = 3
+    llm_max_retries: int = 2
+    llm_retry_backoff_seconds: float = 0.5
 
     model_config = SettingsConfigDict(env_prefix="UA_", env_file=".env")
 
