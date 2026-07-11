@@ -4,9 +4,6 @@ import asyncio
 import time
 
 import pytest
-import pytest_asyncio
-from sqlalchemy import func, select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from ua.database.models import Base, User
 from ua.memory.base import MemoryItem
@@ -16,53 +13,17 @@ from ua.memory.manager import MemoryManager, RetrievedContext
 from ua.memory.short_term import ShortTermMemory
 
 
-# Fixtures for real in-memory stores
-@pytest_asyncio.fixture
-async def session_factory():
-    """Create an in-memory SQLite engine and session factory."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def user_id(session_factory):
-    """Create a test user and return its ID."""
-    async with session_factory() as session:
-        user = User(platform="test", platform_user_id="test_user")
-        session.add(user)
-        await session.commit()
-        await session.refresh(user)
-        return user.id
-
-
-@pytest_asyncio.fixture
+# Fixtures for fake short_term tests
+@pytest.fixture
 def memory_manager():
-    """Create a MemoryManager with real ShortTermMemory and fake long_term/knowledge."""
+    """Create a MemoryManager with fake stores for tests that don't need real DB."""
     short_term = ShortTermMemory(max_turns=20)
-    # Create fake stores for tests that don't need real DB
     fake_long_term = _FakeMemoryStore()
     fake_knowledge = _FakeMemoryStore()
     return MemoryManager(
         short_term=short_term,
         long_term=fake_long_term,
         knowledge=fake_knowledge,
-    )
-
-
-@pytest_asyncio.fixture
-async def real_memory_manager(session_factory, user_id):
-    """Create a MemoryManager with all real in-memory stores."""
-    short_term = ShortTermMemory(max_turns=20)
-    long_term = LongTermMemory(session_factory)
-    knowledge = KnowledgeMemory(session_factory)
-    return MemoryManager(
-        short_term=short_term,
-        long_term=long_term,
-        knowledge=knowledge,
     )
 
 
@@ -114,7 +75,7 @@ async def test_retrieve_context_aggregates_all_three_layers(
 
 @pytest.mark.asyncio
 async def test_retrieve_context_aggregates_all_three_layers_with_knowledge(
-    session_factory: async_sessionmaker, user_id: str
+    session_factory, user_id: str
 ) -> None:
     """Test that retrieve_context combines results from all three stores including knowledge."""
     short_term = ShortTermMemory(max_turns=20)
@@ -266,7 +227,7 @@ async def test_record_turn_then_retrieve_context_includes_it(
 # Tests for eviction summarization (Batch 27)
 @pytest.mark.asyncio
 async def test_eviction_triggers_default_summarizer_and_long_term_write(
-    session_factory: async_sessionmaker,
+    session_factory,
 ) -> None:
     """Test that eviction triggers the default summarizer and writes to long_term."""
     # Create a user
@@ -306,7 +267,7 @@ async def test_eviction_triggers_default_summarizer_and_long_term_write(
 
 @pytest.mark.asyncio
 async def test_evicted_content_recognizable_in_stored_summary(
-    session_factory: async_sessionmaker,
+    session_factory,
 ) -> None:
     """Test that the stored summary contains recognizable content from evicted turns."""
     # Create a user
@@ -342,7 +303,7 @@ async def test_evicted_content_recognizable_in_stored_summary(
 
 @pytest.mark.asyncio
 async def test_repeated_evictions_overwrite_not_duplicate_summary_fact(
-    session_factory: async_sessionmaker,
+    session_factory,
 ) -> None:
     """Test that repeated evictions overwrite (not duplicate) the conversation_summary fact."""
     # Create a user
@@ -369,6 +330,7 @@ async def test_repeated_evictions_overwrite_not_duplicate_summary_fact(
 
     # Check that exactly one row exists for conversation_summary
     async with session_factory() as session:
+        from sqlalchemy import func, select
         result = await session.execute(
             select(func.count()).select_from(Base.metadata.tables["facts"]).where(
                 Base.metadata.tables["facts"].c.user_id == test_user_id,
@@ -404,7 +366,6 @@ async def test_default_summarizer_is_pure_python_no_network_dependency():
     ]
 
     # Time the summarizer execution - should be near-instant
-    import time
     start = time.monotonic()
     result = default_summarizer(messages)
     elapsed = time.monotonic() - start

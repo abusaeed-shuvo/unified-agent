@@ -1,44 +1,10 @@
 """Tests for ConversationManager implementation."""
 
 import pytest
-import pytest_asyncio
 from sqlalchemy import select
-from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
-from ua.conversation.manager import ConversationManager
-from ua.database.models import Base, Message, User
+from ua.database.models import Message, User
 from ua.database.models import Session as SessionModel
-from ua.memory.knowledge import KnowledgeMemory
-from ua.memory.long_term import LongTermMemory
-from ua.memory.manager import MemoryManager
-from ua.memory.short_term import ShortTermMemory
-
-
-@pytest_asyncio.fixture
-async def session_factory():
-    """Create an in-memory SQLite engine and session factory."""
-    engine = create_async_engine("sqlite+aiosqlite:///:memory:")
-    async with engine.begin() as conn:
-        await conn.run_sync(Base.metadata.create_all)
-    factory = async_sessionmaker(engine, expire_on_commit=False)
-    yield factory
-    await engine.dispose()
-
-
-@pytest_asyncio.fixture
-async def memory(session_factory):
-    """Create a MemoryManager instance with real memory layers."""
-    return MemoryManager(
-        short_term=ShortTermMemory(),
-        long_term=LongTermMemory(session_factory),
-        knowledge=KnowledgeMemory(session_factory),
-    )
-
-
-@pytest_asyncio.fixture
-async def conversation_manager(session_factory, memory):
-    """Create a ConversationManager instance."""
-    return ConversationManager(memory=memory, session_factory=session_factory)
 
 
 @pytest.mark.asyncio
@@ -66,13 +32,13 @@ async def test_get_or_create_session_scoped_per_platform(conversation_manager):
 
 
 @pytest.mark.asyncio
-async def test_handle_incoming_records_short_term_turn(conversation_manager, memory):
+async def test_handle_incoming_records_short_term_turn(conversation_manager, real_memory_manager):
     """Test that handle_incoming records the turn in short-term memory."""
     await conversation_manager.handle_incoming("alice", "cli", "Hello there")
 
     # Check that the turn was recorded in short-term memory
     # Access the private _short_term attribute to verify
-    recent_turns = await memory._short_term.recent_turns("alice", limit=10)
+    recent_turns = await real_memory_manager._short_term.recent_turns("alice", limit=10)
 
     assert len(recent_turns) == 1
     assert recent_turns[0].role == "user"
@@ -115,10 +81,10 @@ async def test_handle_incoming_writes_durable_message_row(
 
 
 @pytest.mark.asyncio
-async def test_handle_incoming_returns_retrieved_context(conversation_manager, memory):
+async def test_handle_incoming_returns_retrieved_context(conversation_manager, real_memory_manager):
     """Test that handle_incoming returns a RetrievedContext from memory.retrieve_context."""
     # First, add some data to long-term memory so retrieve_context has something to find
-    await memory.remember_fact("alice", "favorite_color", "blue")
+    await real_memory_manager.remember_fact("alice", "favorite_color", "blue")
 
     # Now handle incoming - search for "blue" to match the fact value
     ctx = await conversation_manager.handle_incoming("alice", "cli", "blue")
@@ -140,7 +106,7 @@ async def test_handle_incoming_returns_retrieved_context(conversation_manager, m
 
 
 @pytest.mark.asyncio
-async def test_handle_outgoing_records_short_term_turn(conversation_manager, memory):
+async def test_handle_outgoing_records_short_term_turn(conversation_manager, real_memory_manager):
     """Test that handle_outgoing records the assistant turn in short-term memory."""
     # First, create a session and record an incoming message
     await conversation_manager.handle_incoming("alice", "cli", "Hello")
@@ -150,7 +116,7 @@ async def test_handle_outgoing_records_short_term_turn(conversation_manager, mem
 
     # Check that both turns were recorded
     # Access the private _short_term attribute to verify
-    recent_turns = await memory._short_term.recent_turns("alice", limit=10)
+    recent_turns = await real_memory_manager._short_term.recent_turns("alice", limit=10)
 
     assert len(recent_turns) == 2
     assert recent_turns[0].role == "user"

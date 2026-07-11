@@ -10,15 +10,9 @@ from ua.personality.loader import PersonalityLoader
 
 
 @pytest.fixture
-def personality_loader() -> PersonalityLoader:
-    """Provide a PersonalityLoader instance."""
-    return PersonalityLoader()
-
-
-@pytest.fixture
-def builder(personality_loader: PersonalityLoader) -> ContextBuilder:
+def builder() -> ContextBuilder:
     """Provide a ContextBuilder instance."""
-    return ContextBuilder(personality_loader)
+    return ContextBuilder(PersonalityLoader())
 
 
 def test_system_message_is_first(builder: ContextBuilder) -> None:
