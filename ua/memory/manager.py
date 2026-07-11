@@ -84,10 +84,8 @@ class MemoryManager:
                 self._evicted_buffer[user_id] = []
             self._evicted_buffer[user_id].append(evicted)
 
-        # Replace the short_term's on_evict callback
-        # Note: This assumes short_term was created without a callback;
-        # if it has one, we'd need to chain them
-        self._short_term._on_evict = _on_evict
+        # Wire up the eviction callback to ShortTermMemory via public method
+        self._short_term.set_on_evict(_on_evict)
 
     async def _flush_evicted_summary(self, user_id: str) -> None:
         """Summarize and persist evicted messages for a user.

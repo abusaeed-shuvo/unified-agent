@@ -49,6 +49,17 @@ class ShortTermMemory:
             self._scratch[user_id] = {}
         self._scratch[user_id][key] = value
 
+    def set_on_evict(self, callback: Callable[[str, Message], None]) -> None:
+        """Set or replace the eviction callback.
+
+        This allows external code (like MemoryManager) to register a callback
+        after construction, without directly accessing the private _on_evict attribute.
+
+        Args:
+            callback: A sync callable that receives (user_id, evicted_message).
+        """
+        self._on_evict = callback
+
     async def search(self, user_id: str, query: str, limit: int = 5) -> list[MemoryItem]:
         """Naive substring search over the per-user key/value scratch space
         (not over turn history — turn history has its own accessor below)."""
