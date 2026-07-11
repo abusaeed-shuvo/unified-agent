@@ -205,3 +205,68 @@ class TestModelManagerRetry:
         assert all(r.levelname == "WARNING" for r in caplog.records)
         assert "attempt 1" in caplog.records[0].message
         assert "attempt 2" in caplog.records[1].message
+
+    @pytest.mark.asyncio
+    async def test_generate_logs_duration_at_info_level(self, caplog):
+        """A successful generate() logs an INFO duration line."""
+        settings = Settings(llm_provider="fake")
+        mgr = ModelManager(settings=settings)
+
+        with caplog.at_level("INFO"):
+            response = await mgr.generate(
+                [Message(role="user", content="hello")]
+            )
+
+        assert response.content == "echo: hello"
+        # Exactly one INFO duration log for the single (successful) attempt.
+        duration_records = [
+            r for r in caplog.records
+            if r.levelname == "INFO" and "LLM generate() call completed in" in r.message
+        ]
+        assert len(duration_records) == 1
+        assert "ms" in duration_records[0].message
+        assert "(attempt 1)" in duration_records[0].message
+
+    @pytest.mark.asyncio
+    async def test_generate_logs_duration_for_each_retry_attempt(self, caplog):
+        """A flaky-then-succeeding adapter logs one duration line per attempt."""
+
+        class FlakyAdapter(LLMAdapter):
+            def __init__(self):
+                self.call_count = 0
+
+            async def generate(self, messages, tools=None, **kwargs):
+                self.call_count += 1
+                if self.call_count < 3:
+                    raise LLMAdapterError(f"Transient {self.call_count}")
+                return LLMResponse(content="ok", tool_calls=[])
+
+        flaky = FlakyAdapter()
+        settings = Settings(
+            llm_provider="fake",
+            llm_max_retries=2,
+            llm_retry_backoff_seconds=0.01,
+        )
+        mgr = ModelManager(settings=settings)
+        mgr._adapter = flaky
+
+        with caplog.at_level("INFO"):
+            response = await mgr.generate(
+                [Message(role="user", content="test")]
+            )
+
+        assert response.content == "ok"
+        # Each of the 3 attempts (2 failed + 1 success) gets its own
+        # duration log line at INFO level (failed attempts log "call failed in",
+        # the successful one logs "call completed in").
+        duration_records = [
+            r for r in caplog.records
+            if r.levelname == "INFO"
+            and "LLM generate() call" in r.message
+            and "in" in r.message
+            and "ms" in r.message
+        ]
+        assert len(duration_records) == 3
+        assert "(attempt 1)" in duration_records[0].message
+        assert "(attempt 2)" in duration_records[1].message
+        assert "(attempt 3)" in duration_records[2].message

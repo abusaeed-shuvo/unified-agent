@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import logging
 import os
 from unittest.mock import patch
 
@@ -722,3 +723,114 @@ async def test_no_override_and_no_stored_preference_uses_agent_default(
     # No preference should have been stored (no override was given).
     stored = await memory_manager.get_fact("default_user", "active_personality")
     assert stored is None
+
+
+# ---------------------------------------------------------------------------
+# Batch 29 Tests: Structured observability logging
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_logs_info_level_lifecycle_events(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+    caplog,
+):
+    """chat() emits INFO lifecycle logs: turn start and turn completion."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=FakeAdapter(),  # echo mode
+    )
+
+    caplog.set_level(logging.INFO)
+    await agent.chat(
+        user_id="log_lifecycle_user",
+        platform="test",
+        message="hello lifecycle",
+    )
+
+    # Turn start and turn completion markers must be present at INFO.
+    assert any(
+        "chat() started for user_id=log_lifecycle_user" in rec.message
+        and rec.levelname == "INFO"
+        for rec in caplog.records
+    )
+    assert any(
+        "chat() completed in" in rec.message and rec.levelname == "INFO"
+        for rec in caplog.records
+    )
+    # At least one LLM generate() duration line must be present.
+    assert any(
+        "LLM generate() call completed in" in rec.message
+        and "ms" in rec.message
+        and rec.levelname == "INFO"
+        for rec in caplog.records
+    )
+
+
+@pytest.mark.asyncio
+async def test_chat_does_not_log_user_message_content_at_info_level(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+    caplog,
+):
+    """Privacy boundary: raw user message must NOT appear in INFO-level logs."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=FakeAdapter(),  # echo mode
+    )
+
+    distinctive = "DISTINCTIVE_SECRET_ABC123_XYZ"
+
+    caplog.set_level(logging.INFO)
+    await agent.chat(
+        user_id="log_privacy_user",
+        platform="test",
+        message=f"please remember {distinctive}",
+    )
+
+    # The distinctive string must NOT appear anywhere in INFO-level logs.
+    assert distinctive not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_chat_logs_user_message_content_at_debug_level(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+    caplog,
+):
+    """DEBUG level DOES include the fuller message detail that INFO omits."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=FakeAdapter(),  # echo mode
+    )
+
+    distinctive = "DISTINCTIVE_SECRET_DEBUG_ABC123_XYZ"
+
+    caplog.set_level(logging.DEBUG)
+    await agent.chat(
+        user_id="log_debug_user",
+        platform="test",
+        message=f"please remember {distinctive}",
+    )
+
+    # At DEBUG level the distinctive string must be present (in the message payload).
+    assert distinctive in caplog.text

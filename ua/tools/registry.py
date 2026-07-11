@@ -9,6 +9,7 @@ from __future__ import annotations
 import importlib
 import inspect
 import pkgutil
+import time
 from pathlib import Path
 
 from ua.config.logging import get_logger
@@ -191,4 +192,19 @@ class ToolRegistry:
             If no tool with *name* has been registered.
         """
         tool = self.get(name)
-        return await tool.run(**kwargs)
+        start = time.monotonic()
+        try:
+            result = await tool.run(**kwargs)
+        except Exception:
+            # Log duration even on failure, then re-raise.
+            duration_ms = (time.monotonic() - start) * 1000
+            logger.info(
+                f"tool '{name}' executed in {duration_ms:.1f}ms, success=False"
+            )
+            raise
+        duration_ms = (time.monotonic() - start) * 1000
+        logger.info(
+            f"tool '{name}' executed in {duration_ms:.1f}ms, "
+            f"success={result.success}"
+        )
+        return result

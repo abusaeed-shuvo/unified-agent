@@ -1,6 +1,7 @@
 """ModelManager — single entrypoint for LLM provider selection."""
 
 import asyncio
+import time
 
 from ua.config.logging import get_logger
 from ua.config.settings import Settings, get_settings
@@ -88,16 +89,35 @@ class ModelManager:
         backoff_seconds = self._settings.llm_retry_backoff_seconds
 
         for attempt in range(max_retries + 1):
+            attempt_num = attempt + 1
+            start = time.monotonic()
             try:
-                return await self._adapter.generate(messages, tools=tools, **kwargs)
+                result = await self._adapter.generate(messages, tools=tools, **kwargs)
             except LLMAdapterError as e:
+                duration_ms = (time.monotonic() - start) * 1000
                 if attempt == max_retries:
                     # Final attempt failed, propagate the error
+                    logger.info(
+                        f"LLM generate() call failed in {duration_ms:.1f}ms "
+                        f"(attempt {attempt_num})"
+                    )
                     raise
-                # Log the retry attempt
+                # Log the duration of the failed attempt, then the retry warning.
+                logger.info(
+                    f"LLM generate() call failed in {duration_ms:.1f}ms "
+                    f"(attempt {attempt_num})"
+                )
                 logger.warning(
-                    f"LLM adapter error on attempt {attempt + 1}, retrying: {e}"
+                    f"LLM adapter error on attempt {attempt_num}, retrying: {e}"
                 )
                 # Linear backoff: backoff_seconds * (attempt + 1)
                 # attempt is 0-indexed, so we use (attempt + 1) for backoff multiplier
                 await asyncio.sleep(backoff_seconds * (attempt + 1))
+            else:
+                # Successful attempt: log its duration and return.
+                duration_ms = (time.monotonic() - start) * 1000
+                logger.info(
+                    f"LLM generate() call completed in {duration_ms:.1f}ms "
+                    f"(attempt {attempt_num})"
+                )
+                return result

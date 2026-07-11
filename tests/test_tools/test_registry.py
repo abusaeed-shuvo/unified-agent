@@ -119,6 +119,31 @@ def test_all_schemas_returns_expected_shape():
     assert calc_schema["function"]["parameters"] == CalculatorTool.parameters
 
 
+@pytest.mark.asyncio
+async def test_execute_logs_tool_name_duration_and_success(caplog):
+    """execute() logs the tool name, duration, and success flag at INFO."""
+    caplog.set_level(logging.INFO, logger="ua.tools.registry")
+
+    reg = _make_registry()
+    result = await reg.execute("calculator", expression="6 * 7")
+
+    assert result.success is True
+    assert result.output == "42"
+
+    info_messages = [
+        rec.getMessage()
+        for rec in caplog.records
+        if rec.levelname == "INFO"
+    ]
+    # Exactly one INFO log line for the successful execution.
+    assert len(info_messages) == 1
+    msg = info_messages[0]
+    assert "calculator" in msg
+    assert "executed in" in msg
+    assert "ms" in msg
+    assert "success=True" in msg
+
+
 def test_discover_called_twice_is_idempotent_not_erroring(caplog):
     """Calling discover() twice does not duplicate-register or crash."""
     caplog.set_level(logging.DEBUG, logger="ua.tools.registry")

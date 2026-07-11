@@ -7,6 +7,8 @@ ConversationManager again → return final text.
 
 from __future__ import annotations
 
+import time
+
 from ua.config.logging import get_logger
 from ua.conversation.context_builder import ContextBuilder
 from ua.conversation.manager import ConversationManager
@@ -104,6 +106,13 @@ class UnifiedAgent:
             await init_db()
             self._db_initialized = True
 
+        # Lifecycle logging: turn start (INFO) — deliberately excludes any
+        # sensitive user content (that only appears at DEBUG level).
+        self._logger.info(
+            f"chat() started for user_id={user_id} platform={platform}"
+        )
+        chat_start = time.monotonic()
+
         # Resolve which personality this call uses, in priority order:
         #   1. Explicit personality_override (if not None)
         #   2. Previously-stored per-user preference (if any)
@@ -140,8 +149,21 @@ class UnifiedAgent:
 
         while round_count < max_rounds:
             round_count += 1
+            self._logger.info(f"tool call round {round_count} of {max_rounds}")
+
+            # DEBUG-only: full message payload (may contain sensitive user content).
+            self._logger.debug(
+                f"Sending {len(messages)} message(s) to LLM: {messages}"
+            )
+
+            gen_start = time.monotonic()
             response = await self._model_manager.generate(
                 messages, tools=tool_schemas
+            )
+            gen_duration_ms = (time.monotonic() - gen_start) * 1000
+            self._logger.info(
+                f"LLM generate() call completed in {gen_duration_ms:.1f}ms "
+                f"(round {round_count})"
             )
 
             # If no tool calls, we're done
@@ -150,7 +172,14 @@ class UnifiedAgent:
 
             # Execute each tool call and append results
             for tc in response.tool_calls:
+                self._logger.info(
+                    f"tool call round {round_count}: executing tool '{tc.name}'"
+                )
+                # DEBUG-only: full tool call arguments (may be sensitive).
+                self._logger.debug(f"tool '{tc.name}' arguments: {tc.arguments}")
                 tool_result = await self._execute_tool_safely(tc)
+                # DEBUG-only: full tool result content (may be sensitive).
+                self._logger.debug(f"tool '{tc.name}' result: {tool_result}")
                 messages.append(
                     Message(
                         role="tool",
@@ -173,6 +202,10 @@ class UnifiedAgent:
 
         # Step 6: Handle outgoing (record assistant turn)
         await self._conversation.handle_outgoing(user_id, platform, final_text)
+
+        # Lifecycle logging: turn completion (INFO) with total duration.
+        total_duration_ms = (time.monotonic() - chat_start) * 1000
+        self._logger.info(f"chat() completed in {total_duration_ms:.1f}ms")
 
         # Step 7: Return the final text
         return final_text
