@@ -14,6 +14,20 @@ _engine: AsyncEngine | None = None
 _session_factory: async_sessionmaker[AsyncSession] | None = None
 
 
+def reset_engine() -> None:
+    """Reset the cached engine and session factory.
+
+    Used for testing to ensure a fresh engine is created with the current
+    settings. Call this before tests that need to override database_url.
+    """
+    global _engine, _session_factory
+    if _engine is not None:
+        # Can't await in sync context - the engine will be garbage collected
+        pass
+    _engine = None
+    _session_factory = None
+
+
 def get_engine() -> AsyncEngine:
     """Create (or return a cached) async engine using settings.database_url.
 

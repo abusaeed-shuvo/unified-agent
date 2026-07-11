@@ -4,6 +4,12 @@ from __future__ import annotations
 
 import logging
 import os
+
+# Set default environment variables for all tests in this module BEFORE any imports
+# This prevents unified_agent.db from being created in the repo root
+os.environ.setdefault("UA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+os.environ.setdefault("UA_LLM_PROVIDER", "fake")
+
 from unittest.mock import patch
 
 import pytest
@@ -98,10 +104,21 @@ def _build_test_agent(
 ):
     """Build a UnifiedAgent with a ModelManager that uses the given FakeAdapter."""
     # Create a ModelManager with fake provider, then swap in our custom adapter
+    # Use in-memory database for test hygiene (no file leak into repo root)
     if settings is None:
-        settings = Settings()
+        settings = Settings(database_url="sqlite+aiosqlite:///:memory:")
     model_manager = ModelManager(settings=settings)
     model_manager._adapter = fake_adapter
+
+    # Important: reset the global engine cache so init_db() uses our in-memory URL
+    # This prevents a real unified_agent.db file from being created in the repo root
+    import ua.database.engine as engine_mod
+    engine_mod._engine = None
+    engine_mod._session_factory = None
+    # Also clear settings cache to ensure fresh settings are used
+    from ua.config.settings import get_settings
+    get_settings.cache_clear()
+
     return UnifiedAgent(
         conversation=conversation_manager,
         context_builder=context_builder,
@@ -302,6 +319,7 @@ async def test_chat_records_both_user_and_assistant_turns(
 @pytest.mark.asyncio
 async def test_build_default_agent_uses_settings():
     """build_default_agent() with UA_LLM_PROVIDER=fake constructs and works."""
+    import ua.database.engine as engine_mod
     from ua.core.factory import build_default_agent
 
     # Override settings via environment variables
@@ -313,9 +331,12 @@ async def test_build_default_agent_uses_settings():
         },
         clear=False,
     ):
-        # Clear the cached settings so our env vars take effect
+        # Clear the cached settings and engine so our env vars take effect
         from ua.config.settings import get_settings
+
         get_settings.cache_clear()
+        engine_mod._engine = None
+        engine_mod._session_factory = None
 
         agent = build_default_agent()
 
@@ -366,7 +387,8 @@ async def test_chat_resolves_multiple_chained_tool_call_rounds(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(max_tool_call_rounds=4)  # Allow enough rounds
+    # Allow enough rounds for the 4 tool-call responses
+    settings = Settings(max_tool_call_rounds=4, database_url="sqlite+aiosqlite:///:memory:")
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -419,7 +441,9 @@ async def test_chat_stops_at_max_rounds_when_model_keeps_requesting_tools(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(max_tool_call_rounds=2)
+    settings = Settings(
+        max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:"
+    )
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -462,7 +486,9 @@ async def test_chat_logs_warning_when_round_limit_hit(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(max_tool_call_rounds=1)
+    settings = Settings(
+        max_tool_call_rounds=1, database_url="sqlite+aiosqlite:///:memory:"
+    )
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -509,7 +535,9 @@ async def test_chat_at_round_limit_does_not_raise_exception(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(max_tool_call_rounds=2)
+    settings = Settings(
+        max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:"
+    )
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,

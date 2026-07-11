@@ -53,16 +53,33 @@ async def test_init_db_creates_tables(monkeypatch):
 
 
 @pytest.mark.asyncio
-async def test_get_engine_returns_cached_instance():
+async def test_get_engine_returns_cached_instance(monkeypatch):
     """Test that get_engine returns the same engine on repeated calls."""
+    # Reset cache and set in-memory database
+    from ua.config.settings import get_settings
+    from ua.database import engine as db_engine
+
+    db_engine._engine = None
+    get_settings.cache_clear()
+    monkeypatch.setenv("UA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
     engine1 = get_engine()
     engine2 = get_engine()
     assert engine1 is engine2
 
 
 @pytest.mark.asyncio
-async def test_get_session_yields_session():
+async def test_get_session_yields_session(monkeypatch):
     """Test that get_session yields a valid AsyncSession."""
+    # Set in-memory database to avoid file leak
+    from ua.config.settings import get_settings
+    from ua.database import engine as db_engine
+
+    db_engine._engine = None
+    db_engine._session_factory = None
+    get_settings.cache_clear()
+    monkeypatch.setenv("UA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
+
     session_gen = get_session()
     session = await session_gen.__anext__()
     assert session.is_active

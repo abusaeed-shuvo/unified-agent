@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import os
 from unittest.mock import MagicMock
 
 import pytest
@@ -15,6 +16,10 @@ from httpx import ASGITransport, AsyncClient
 @pytest.mark.asyncio
 async def test_health_endpoint_returns_ok():
     """GET /health returns HTTP 200 with body {'status': 'ok'}."""
+    # Set in-memory database before importing the app
+    os.environ["UA_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    os.environ["UA_LLM_PROVIDER"] = "fake"
+
     from ua.interfaces.web.api import app
 
     async with AsyncClient(
@@ -34,7 +39,19 @@ async def test_health_endpoint_returns_ok():
 @pytest.mark.asyncio
 async def test_chat_endpoint_returns_valid_response(monkeypatch):
     """POST /chat with valid body returns HTTP 200 with ChatResponse body."""
+    # Set in-memory database before importing the app
+    os.environ["UA_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    os.environ["UA_LLM_PROVIDER"] = "fake"
+
+    import ua.config.settings as settings_mod
+
+    # Reset the engine cache to pick up the new settings
+    import ua.database.engine as engine_mod
     from ua.interfaces.web.api import app, lifespan
+
+    engine_mod._engine = None
+    engine_mod._session_factory = None
+    settings_mod.get_settings.cache_clear()
 
     # Create a mock agent
     mock_agent = MagicMock()
@@ -68,7 +85,19 @@ async def test_chat_endpoint_returns_valid_response(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_endpoint_uses_web_platform(monkeypatch):
     """POST /chat passes platform='web' to agent.chat."""
+    # Set in-memory database before importing the app
+    os.environ["UA_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    os.environ["UA_LLM_PROVIDER"] = "fake"
+
+    import ua.config.settings as settings_mod
+
+    # Reset the engine cache to pick up the new settings
+    import ua.database.engine as engine_mod
     from ua.interfaces.web.api import app, lifespan
+
+    engine_mod._engine = None
+    engine_mod._session_factory = None
+    settings_mod.get_settings.cache_clear()
 
     # Track calls to agent.chat
     calls_made = []
@@ -107,7 +136,19 @@ async def test_agent_built_once_not_per_request(monkeypatch):
     We verify this by making two sequential /chat calls and checking
     that conversation state persists (same agent instance used).
     """
+    # Set in-memory database before importing the app
+    os.environ["UA_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    os.environ["UA_LLM_PROVIDER"] = "fake"
+
+    import ua.config.settings as settings_mod
+
+    # Reset the engine cache to pick up the new settings
+    import ua.database.engine as engine_mod
     from ua.interfaces.web.api import app, lifespan
+
+    engine_mod._engine = None
+    engine_mod._session_factory = None
+    settings_mod.get_settings.cache_clear()
 
     # Track calls to agent.chat
     calls_made = []
@@ -150,6 +191,10 @@ async def test_agent_built_once_not_per_request(monkeypatch):
 @pytest.mark.asyncio
 async def test_chat_endpoint_missing_fields_returns_422():
     """POST /chat with missing 'message' field returns 422 (Pydantic validation)."""
+    # Set in-memory database before importing the app
+    os.environ["UA_DATABASE_URL"] = "sqlite+aiosqlite:///:memory:"
+    os.environ["UA_LLM_PROVIDER"] = "fake"
+
     from ua.interfaces.web.api import app
 
     async with AsyncClient(
