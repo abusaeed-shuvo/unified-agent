@@ -128,10 +128,9 @@ async def test_handle_incoming_returns_retrieved_context(conversation_manager, m
     assert hasattr(ctx, "relevant_facts")
     assert hasattr(ctx, "relevant_knowledge")
 
-    # The recent_turns should include the message we just sent
-    assert len(ctx.recent_turns) == 1
-    assert ctx.recent_turns[0].role == "user"
-    assert ctx.recent_turns[0].content == "blue"
+    # The recent_turns should NOT include the current message (it's retrieved BEFORE recording)
+    # This is the fix for the duplication bug: recent_turns = prior history only
+    assert len(ctx.recent_turns) == 0
 
     # The relevant_facts should include the fact we added
     # LongTermMemory.search does substring match on Fact.value

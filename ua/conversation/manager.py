@@ -108,9 +108,9 @@ class ConversationManager:
         Process an incoming user message.
 
         1. get_or_create_session(user_id, platform).
-        2. Record the turn via self.memory.record_turn(user_id, "user", message).
-        3. Write a durable Message row (role="user") linked to the session.
-        4. Return self.memory.retrieve_context(user_id, message).
+        2. Retrieve context via self.memory.retrieve_context(user_id, message).
+        3. Record the turn via self.memory.record_turn(user_id, "user", message).
+        4. Write a durable Message row (role="user") linked to the session.
 
         Args:
             user_id: The user identifier.
@@ -122,6 +122,12 @@ class ConversationManager:
         """
         # Get or create session (idempotent)
         await self.get_or_create_session(user_id, platform)
+
+        # Retrieve context BEFORE recording the turn, so that recent_turns
+        # contains only PRIOR turns (not the current one being processed).
+        # This preserves ContextBuilder's contract: recent_turns = history,
+        # new_user_message = the turn currently being processed.
+        context = await self._memory.retrieve_context(user_id, message)
 
         # Record turn in short-term memory
         await self._memory.record_turn(user_id, "user", message)
@@ -151,8 +157,7 @@ class ConversationManager:
             session.add(message_row)
             await session.commit()
 
-        # Retrieve and return context
-        return await self._memory.retrieve_context(user_id, message)
+        return context
 
     async def handle_outgoing(self, user_id: str, platform: str, response: str) -> None:
         """

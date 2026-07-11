@@ -834,3 +834,105 @@ async def test_chat_logs_user_message_content_at_debug_level(
 
     # At DEBUG level the distinctive string must be present (in the message payload).
     assert distinctive in caplog.text
+
+
+# ---------------------------------------------------------------------------
+# Batch 29.5 Tests: No message duplication in LLM payload
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_current_message_appears_exactly_once_in_llm_payload(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """The current user message must appear exactly once in the LLM message list."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    await agent.chat(
+        user_id="dupe_test_user",
+        platform="test",
+        message="hello world",
+    )
+
+    # Get the messages that were sent to the LLM
+    messages_sent = adapter.captured_messages[0]
+
+    # Count how many times "hello world" appears
+    hello_count = sum(1 for m in messages_sent if m.content == "hello world")
+
+    # The current message should appear exactly once
+    assert hello_count == 1, f"Expected 1 occurrence of 'hello world', got {hello_count}"
+
+    # The last message should be the user message
+    assert messages_sent[-1].role == "user"
+    assert messages_sent[-1].content == "hello world"
+
+
+@pytest.mark.asyncio
+async def test_multi_turn_conversation_no_duplication(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """Multi-turn conversation: current message once, prior messages once each."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    # First call
+    await agent.chat(
+        user_id="multi_turn_user",
+        platform="test",
+        message="first message",
+    )
+
+    # Second call
+    adapter.captured_messages.clear()
+    await agent.chat(
+        user_id="multi_turn_user",
+        platform="test",
+        message="second message",
+    )
+
+    # Third call - check the messages
+    adapter.captured_messages.clear()
+    await agent.chat(
+        user_id="multi_turn_user",
+        platform="test",
+        message="third message",
+    )
+
+    messages_sent = adapter.captured_messages[0]
+
+    # Count occurrences of each message
+    first_count = sum(1 for m in messages_sent if m.content == "first message")
+    second_count = sum(1 for m in messages_sent if m.content == "second message")
+    third_count = sum(1 for m in messages_sent if m.content == "third message")
+
+    # Each message should appear exactly once
+    assert first_count == 1, f"Expected 1 occurrence of 'first message', got {first_count}"
+    assert second_count == 1, f"Expected 1 occurrence of 'second message', got {second_count}"
+    assert third_count == 1, f"Expected 1 occurrence of 'third message', got {third_count}"
+
+    # Verify correct order: system, first, second, third
+    user_messages = [m for m in messages_sent if m.role == "user"]
+    assert len(user_messages) == 3
+    assert user_messages[0].content == "first message"
+    assert user_messages[1].content == "second message"
+    assert user_messages[2].content == "third message"
