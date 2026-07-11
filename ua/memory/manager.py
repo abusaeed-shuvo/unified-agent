@@ -1,6 +1,7 @@
 """MemoryManager facade over all three memory layers."""
 
 import asyncio
+from collections.abc import Callable
 from dataclasses import dataclass
 
 from ua.memory.base import MemoryItem
@@ -8,6 +9,28 @@ from ua.memory.knowledge import KnowledgeMemory
 from ua.memory.long_term import LongTermMemory
 from ua.memory.short_term import ShortTermMemory
 from ua.models.base import Message
+
+
+def default_summarizer(messages: list[Message]) -> str:
+    """Default pure-Python summarizer for evicted turns.
+
+    This is a deterministic, non-LLM summarizer that joins evicted messages
+    as "{role}: {content}" lines, truncated to 500 characters max.
+
+    Example input:
+        [Message(role="user", content="Hello"), Message(role="assistant", content="Hi there!")]
+    Example output:
+        "user: Hello\nassistant: Hi there!"
+
+    Args:
+        messages: List of evicted messages to summarize.
+
+    Returns:
+        A string summary, truncated to 500 characters.
+    """
+    lines = [f"{msg.role}: {msg.content}" for msg in messages]
+    summary = "\n".join(lines)
+    return summary[:500] if len(summary) > 500 else summary
 
 
 @dataclass
@@ -32,6 +55,7 @@ class MemoryManager:
         short_term: ShortTermMemory,
         long_term: LongTermMemory,
         knowledge: KnowledgeMemory,
+        summarizer: Callable[[list[Message]], str] | None = None,
     ) -> None:
         """Initialize with the three memory layer instances.
 
@@ -39,10 +63,45 @@ class MemoryManager:
             short_term: ShortTermMemory instance for ephemeral turn history.
             long_term: LongTermMemory instance for durable user facts.
             knowledge: KnowledgeMemory instance for uploaded knowledge documents.
+            summarizer: Optional callable to summarize evicted turns.
+                Defaults to a pure-Python, non-LLM function.
         """
         self._short_term = short_term
         self._long_term = long_term
         self._knowledge = knowledge
+        self._summarizer = summarizer if summarizer is not None else default_summarizer
+
+        # Track evicted messages per user for summarization
+        # This is needed because on_evict is called per-message, but we want
+        # to summarize all evicted messages together
+        self._evicted_buffer: dict[str, list[Message]] = {}
+
+        # Wire up the eviction callback to ShortTermMemory
+        # We use a sync callback that schedules async work via the event loop
+        def _on_evict(user_id: str, evicted: Message) -> None:
+            # Buffer the evicted message
+            if user_id not in self._evicted_buffer:
+                self._evicted_buffer[user_id] = []
+            self._evicted_buffer[user_id].append(evicted)
+
+        # Replace the short_term's on_evict callback
+        # Note: This assumes short_term was created without a callback;
+        # if it has one, we'd need to chain them
+        self._short_term._on_evict = _on_evict
+
+    async def _flush_evicted_summary(self, user_id: str) -> None:
+        """Summarize and persist evicted messages for a user.
+
+        This is called after record_turn to ensure the async long_term.put
+        can be awaited properly.
+        """
+        if user_id not in self._evicted_buffer:
+            return
+
+        evicted_messages = self._evicted_buffer.pop(user_id)
+        if evicted_messages:
+            summary = self._summarizer(evicted_messages)
+            await self._long_term.put(user_id, "conversation_summary", summary)
 
     async def retrieve_context(self, user_id: str, message: str) -> RetrievedContext:
         """Concurrently fetch context from all three memory layers.
@@ -79,6 +138,13 @@ class MemoryManager:
             content: The message content.
         """
         await self._short_term.append_turn(user_id, role, content)
+        # After appending, check if any messages were evicted and flush summary
+        await self._flush_evicted_summary(user_id)
+
+    @property
+    def long_term(self) -> LongTermMemory:
+        """Expose long_term for testing and inspection."""
+        return self._long_term
 
     async def remember_fact(self, user_id: str, key: str, value: str) -> None:
         """Store a durable fact in long-term memory.

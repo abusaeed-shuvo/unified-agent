@@ -210,3 +210,45 @@ async def test_turns_and_scratch_isolated():
 
     # They should not interfere with each other
     assert await mem.get("user1", "nonexistent") is None
+
+
+# Tests for eviction callback (Batch 27)
+@pytest.mark.asyncio
+async def test_eviction_callback_fires_with_evicted_message():
+    """Test that the on_evict callback fires with the correct evicted message."""
+    evicted_messages: list[tuple[str, str]] = []
+
+    def on_evict(user_id: str, message) -> None:
+        evicted_messages.append((user_id, message.content))
+
+    mem = ShortTermMemory(max_turns=3, on_evict=on_evict)
+
+    # Append 4 turns to trigger one eviction
+    for i in range(4):
+        await mem.append_turn("user1", "user", f"message {i}")
+
+    # The callback should have been called once with the evicted message
+    assert len(evicted_messages) == 1
+    assert evicted_messages[0] == ("user1", "message 0")
+
+
+@pytest.mark.asyncio
+async def test_no_eviction_callback_fires_while_under_cap():
+    """Test that the on_evict callback does not fire while under the cap."""
+    evicted_messages: list[tuple[str, str]] = []
+
+    def on_evict(user_id: str, message) -> None:
+        evicted_messages.append((user_id, message.content))
+
+    mem = ShortTermMemory(max_turns=3, on_evict=on_evict)
+
+    # Append only 3 turns (exactly at cap, no eviction)
+    for i in range(3):
+        await mem.append_turn("user1", "user", f"message {i}")
+
+    # The callback should NOT have been called
+    assert len(evicted_messages) == 0
+
+    # Verify turns are still there
+    turns = await mem.recent_turns("user1", limit=10)
+    assert len(turns) == 3

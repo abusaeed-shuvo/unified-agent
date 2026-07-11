@@ -5,6 +5,7 @@ import time
 
 import pytest
 import pytest_asyncio
+from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker, create_async_engine
 
 from ua.database.models import Base, User
@@ -260,3 +261,164 @@ async def test_record_turn_then_retrieve_context_includes_it(
     assert len(context.recent_turns) == 1
     assert context.recent_turns[0].role == "user"
     assert context.recent_turns[0].content == "What is the weather?"
+
+
+# Tests for eviction summarization (Batch 27)
+@pytest.mark.asyncio
+async def test_eviction_triggers_default_summarizer_and_long_term_write(
+    session_factory: async_sessionmaker,
+) -> None:
+    """Test that eviction triggers the default summarizer and writes to long_term."""
+    # Create a user
+    async with session_factory() as session:
+        user = User(platform="test", platform_user_id="test_user_evict")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        test_user_id = user.id
+
+    # Create memory manager with small max_turns
+    short_term = ShortTermMemory(max_turns=3)
+    long_term = LongTermMemory(session_factory)
+    knowledge = KnowledgeMemory(session_factory)
+    manager = MemoryManager(
+        short_term=short_term,
+        long_term=long_term,
+        knowledge=knowledge,
+    )
+
+    # Record 3 turns (at cap, no eviction yet)
+    for i in range(3):
+        await manager.record_turn(test_user_id, "user", f"Message {i}")
+
+    # Verify no summary exists yet
+    summary = await manager._long_term.get(test_user_id, "conversation_summary")
+    assert summary is None
+
+    # Record one more turn to trigger eviction
+    await manager.record_turn(test_user_id, "user", "Message 3")
+
+    # Now a summary should exist
+    summary = await manager._long_term.get(test_user_id, "conversation_summary")
+    assert summary is not None
+    assert "Message 0" in summary
+
+
+@pytest.mark.asyncio
+async def test_evicted_content_recognizable_in_stored_summary(
+    session_factory: async_sessionmaker,
+) -> None:
+    """Test that the stored summary contains recognizable content from evicted turns."""
+    # Create a user
+    async with session_factory() as session:
+        user = User(platform="test", platform_user_id="test_user_summary")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        test_user_id = user.id
+
+    # Create memory manager with small max_turns
+    short_term = ShortTermMemory(max_turns=2)
+    long_term = LongTermMemory(session_factory)
+    knowledge = KnowledgeMemory(session_factory)
+    manager = MemoryManager(
+        short_term=short_term,
+        long_term=long_term,
+        knowledge=knowledge,
+    )
+
+    # Record turns with specific content
+    await manager.record_turn(test_user_id, "user", "I love chess and strategy games")
+    await manager.record_turn(test_user_id, "assistant", "That's interesting!")
+    await manager.record_turn(test_user_id, "user", "What about poker?")  # Triggers eviction
+
+    # Get the stored summary
+    summary = await manager._long_term.get(test_user_id, "conversation_summary")
+
+    # The summary should contain content from the evicted turn
+    assert "chess" in summary
+    assert "strategy" in summary
+
+
+@pytest.mark.asyncio
+async def test_repeated_evictions_overwrite_not_duplicate_summary_fact(
+    session_factory: async_sessionmaker,
+) -> None:
+    """Test that repeated evictions overwrite (not duplicate) the conversation_summary fact."""
+    # Create a user
+    async with session_factory() as session:
+        user = User(platform="test", platform_user_id="test_user_overwrite")
+        session.add(user)
+        await session.commit()
+        await session.refresh(user)
+        test_user_id = user.id
+
+    # Create memory manager with small max_turns
+    short_term = ShortTermMemory(max_turns=2)
+    long_term = LongTermMemory(session_factory)
+    knowledge = KnowledgeMemory(session_factory)
+    manager = MemoryManager(
+        short_term=short_term,
+        long_term=long_term,
+        knowledge=knowledge,
+    )
+
+    # Record 6 turns to trigger multiple evictions
+    for i in range(6):
+        await manager.record_turn(test_user_id, "user", f"Message number {i} about topic X")
+
+    # Check that exactly one row exists for conversation_summary
+    async with session_factory() as session:
+        result = await session.execute(
+            select(func.count()).select_from(Base.metadata.tables["facts"]).where(
+                Base.metadata.tables["facts"].c.user_id == test_user_id,
+                Base.metadata.tables["facts"].c.key == "conversation_summary"
+            )
+        )
+        count = result.scalar_one()
+        assert count == 1, f"Expected exactly 1 row, but found {count}"
+
+    # The summary should contain the most recently evicted message (message 3)
+    # With max_turns=2, each eviction overwrites the previous summary
+    summary = await manager._long_term.get(test_user_id, "conversation_summary")
+    assert "Message number 3" in summary  # Last evicted message
+
+
+@pytest.mark.asyncio
+async def test_default_summarizer_is_pure_python_no_network_dependency():
+    """Test that the default summarizer is pure Python with no network dependency.
+
+    This test verifies:
+    1. The summarizer completes quickly (no network I/O)
+    2. No adapter or HTTP mock is configured/needed
+    3. The summarizer produces deterministic output
+    """
+    from ua.memory.manager import default_summarizer
+    from ua.models.base import Message
+
+    # Create test messages
+    messages = [
+        Message(role="user", content="Hello"),
+        Message(role="assistant", content="Hi there!"),
+        Message(role="user", content="How are you?"),
+    ]
+
+    # Time the summarizer execution - should be near-instant
+    import time
+    start = time.monotonic()
+    result = default_summarizer(messages)
+    elapsed = time.monotonic() - start
+
+    # Should complete in well under 1 second (no network calls)
+    assert elapsed < 0.1, f"Summarizer took {elapsed:.3f}s, likely making network calls"
+
+    # Verify deterministic output format
+    assert result == "user: Hello\nassistant: Hi there!\nuser: How are you?"
+
+    # Verify truncation works
+    long_messages = [
+        Message(role="user", content="x" * 300),
+        Message(role="assistant", content="y" * 300),
+    ]
+    result = default_summarizer(long_messages)
+    assert len(result) == 500, f"Expected 500 chars max, got {len(result)}"
