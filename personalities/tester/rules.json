@@ -1,0 +1,5 @@
+{
+	"allow_tools": ["calculator", "filesystem"],
+	"max_response_tokens": 256,
+	"forbidden_topics": ["casual_chat", "opinions"]
+}

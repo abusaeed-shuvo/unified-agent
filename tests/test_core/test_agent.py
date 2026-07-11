@@ -18,7 +18,7 @@ from ua.memory.knowledge import KnowledgeMemory
 from ua.memory.long_term import LongTermMemory
 from ua.memory.manager import MemoryManager
 from ua.memory.short_term import ShortTermMemory
-from ua.models.base import LLMResponse, ToolCall
+from ua.models.base import LLMAdapter, LLMResponse, Message, ToolCall
 from ua.models.manager import ModelManager
 from ua.personality.loader import PersonalityLoader
 from ua.tools.registry import ToolRegistry
@@ -26,6 +26,7 @@ from ua.tools.registry import ToolRegistry
 # ---------------------------------------------------------------------------
 # Fixtures
 # ---------------------------------------------------------------------------
+
 
 @pytest_asyncio.fixture
 async def db_session():
@@ -86,6 +87,7 @@ def tool_registry():
 # Helper: build a test agent with a custom FakeAdapter
 # ---------------------------------------------------------------------------
 
+
 def _build_test_agent(
     conversation_manager,
     context_builder,
@@ -108,9 +110,30 @@ def _build_test_agent(
     )
 
 
+class _CapturingFakeAdapter(LLMAdapter):
+    """FakeAdapter that records the messages passed to generate() and echoes."""
+
+    def __init__(self) -> None:
+        self.captured_messages: list[list[Message]] = []
+        self._call_count = 0
+
+    async def generate(
+        self,
+        messages: list[Message],
+        tools: list[dict] | None = None,
+        **kwargs,
+    ) -> LLMResponse:
+        self._call_count += 1
+        # Snapshot the messages for inspection by tests
+        self.captured_messages.append(list(messages))
+        last = messages[-1]
+        return LLMResponse(content=f"echo: {last.content}")
+
+
 # ---------------------------------------------------------------------------
 # Tests
 # ---------------------------------------------------------------------------
+
 
 @pytest.mark.asyncio
 async def test_chat_simple_roundtrip_no_tools(
@@ -313,6 +336,7 @@ async def test_build_default_agent_uses_settings():
 # Batch 25 Tests: Bounded tool call loop
 # ---------------------------------------------------------------------------
 
+
 @pytest.mark.asyncio
 async def test_chat_resolves_multiple_chained_tool_call_rounds(
     conversation_manager,
@@ -505,3 +529,196 @@ async def test_chat_at_round_limit_does_not_raise_exception(
         assert isinstance(response, str)
     except Exception as e:
         pytest.fail(f"chat() raised an exception when it should not: {e}")
+
+
+# ---------------------------------------------------------------------------
+# Batch 28 Tests: Per-user personality overrides
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_personality_override_used_for_that_call(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """personality_override='tester' makes that call use tester's system message."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    await agent.chat(
+        user_id="override_user",
+        platform="test",
+        message="hi",
+        personality_override="tester",
+    )
+
+    # The system message is the first message of the first generate() call.
+    system_message = adapter.captured_messages[0][0]
+    assert system_message.role == "system"
+    # Tester-specific content must appear (NOT assistant-specific content).
+    assert "TESTER" in system_message.content
+    assert "minimal automated testing persona" in system_message.content
+    # Assistant-specific warm/helpful tone must NOT appear.
+    assert "helpful, honest, and direct AI assistant" not in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_personality_override_persists_as_sticky_preference_for_subsequent_calls(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """After an override call, a later call without override keeps using tester."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    # First call with explicit override.
+    await agent.chat(
+        user_id="sticky_user",
+        platform="test",
+        message="hi",
+        personality_override="tester",
+    )
+    # The override should have been persisted as a per-user preference.
+    stored = await memory_manager.get_fact("sticky_user", "active_personality")
+    assert stored == "tester"
+
+    # Second call WITHOUT an override — should still use tester (sticky).
+    adapter.captured_messages.clear()
+    await agent.chat(
+        user_id="sticky_user",
+        platform="test",
+        message="hi again",
+    )
+    system_message = adapter.captured_messages[0][0]
+    assert "TESTER" in system_message.content
+    assert "helpful, honest, and direct AI assistant" not in system_message.content
+
+
+@pytest.mark.asyncio
+async def test_stored_preference_scoped_per_user_not_global(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """A different user with no stored preference uses the agent's default."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    # alice gets the override (and thus a stored preference).
+    await agent.chat(
+        user_id="alice",
+        platform="test",
+        message="hi",
+        personality_override="tester",
+    )
+
+    # bob has never chatted — no stored preference — so he uses the default.
+    adapter.captured_messages.clear()
+    await agent.chat(
+        user_id="bob",
+        platform="test",
+        message="hi bob",
+    )
+    system_message = adapter.captured_messages[0][0]
+    # bob must get the assistant (default) personality, not tester.
+    assert "helpful, honest, and direct AI assistant" in system_message.content
+    assert "TESTER" not in system_message.content
+
+    # Sanity: alice's stored preference is still tester, bob has none.
+    alice_stored = await memory_manager.get_fact("alice", "active_personality")
+    bob_stored = await memory_manager.get_fact("bob", "active_personality")
+    assert alice_stored == "tester"
+    assert bob_stored is None
+
+
+@pytest.mark.asyncio
+async def test_explicit_override_takes_priority_over_stored_preference(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """An explicit override wins over a previously-stored preference."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    # Seed a stored preference of "tester" for the user (without an override call).
+    await memory_manager.remember_fact("priority_user", "active_personality", "tester")
+
+    # Now call with an explicit override back to the default "assistant".
+    adapter.captured_messages.clear()
+    await agent.chat(
+        user_id="priority_user",
+        platform="test",
+        message="hi",
+        personality_override="assistant",
+    )
+    system_message = adapter.captured_messages[0][0]
+    # The explicit override must win over the stored "tester" preference.
+    assert "helpful, honest, and direct AI assistant" in system_message.content
+    assert "TESTER" not in system_message.content
+
+    # And the override should have overwritten the stored preference.
+    stored = await memory_manager.get_fact("priority_user", "active_personality")
+    assert stored == "assistant"
+
+
+@pytest.mark.asyncio
+async def test_no_override_and_no_stored_preference_uses_agent_default(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """Baseline: no override and no stored preference uses the agent default."""
+    adapter = _CapturingFakeAdapter()
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=adapter,
+    )
+
+    await agent.chat(
+        user_id="default_user",
+        platform="test",
+        message="hi",
+    )
+
+    system_message = adapter.captured_messages[0][0]
+    # Default agent personality is "assistant".
+    assert "helpful, honest, and direct AI assistant" in system_message.content
+    assert "TESTER" not in system_message.content
+    # No preference should have been stored (no override was given).
+    stored = await memory_manager.get_fact("default_user", "active_personality")
+    assert stored is None

@@ -49,6 +49,15 @@ class ConversationManager:
         self._memory = memory
         self._session_factory = session_factory
 
+    @property
+    def memory(self) -> MemoryManager:
+        """Public accessor for the MemoryManager backing this conversation.
+
+        Exposed so collaborators (e.g. UnifiedAgent) can read/write durable
+        facts without reaching into the private ``_memory`` attribute.
+        """
+        return self._memory
+
     async def get_or_create_session(self, user_id: str, platform: str) -> str:
         """
         Look up an existing Session row for (user_id, platform). If

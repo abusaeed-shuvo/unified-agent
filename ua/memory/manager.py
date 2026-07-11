@@ -156,3 +156,19 @@ class MemoryManager:
             value: The fact value.
         """
         await self._long_term.put(user_id, key, value)
+
+    async def get_fact(self, user_id: str, key: str) -> str | None:
+        """Read a previously-remembered fact for a specific key.
+
+        Thin passthrough to ``LongTermMemory.get``. Used by the agent to
+        resolve a previously-stored per-user preference (e.g. an active
+        personality) without reaching into the long-term store directly.
+
+        Args:
+            user_id: The user identifier.
+            key: The fact key.
+
+        Returns:
+            The stored value, or None if no fact exists for (user_id, key).
+        """
+        return await self._long_term.get(user_id, key)
