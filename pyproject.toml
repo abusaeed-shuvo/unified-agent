@@ -25,6 +25,7 @@ dependencies = [
     "python-dotenv",
     "pydantic-settings>=2.14.2",
     "aiosqlite>=0.22.1",
+    "asyncssh>=2.24.0",
 ]
 
 [project.optional-dependencies]

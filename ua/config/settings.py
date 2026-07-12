@@ -17,6 +17,18 @@ class Settings(BaseSettings):
     llm_max_retries: int = 2
     llm_retry_backoff_seconds: float = 0.5
 
+    # Sandbox SSH connection settings
+    # These are optional and unset by default. If not configured, sandbox tools
+    # will fail closed (return error without attempting connections).
+    sandbox_host: str | None = None
+    """Hostname or IP address of the SSH sandbox server. If None, sandbox tools are disabled."""
+    sandbox_port: int = 22
+    """SSH port for the sandbox server (default 22)."""
+    sandbox_username: str | None = None
+    """SSH username for authentication to the sandbox server."""
+    sandbox_key_path: str | None = None
+    """Path to an SSH private key file for authentication (NOT raw key material)."""
+
     model_config = SettingsConfigDict(env_prefix="UA_", env_file=".env")
 
 
