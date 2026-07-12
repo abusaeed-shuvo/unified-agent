@@ -291,6 +291,7 @@ The layering above is deliberately built so these require **additive**, not stru
 - **Multi-agent collaboration** → multiple `UnifiedAgent` instances with distinct personalities, orchestrated by a new (later) `ua/core/orchestrator.py` that itself just calls `.chat()` on each agent.
 - **Voice / vision** → new Interfaces + a new `Message` content type (audio/image), not a new Core.
 - **Background workers / scheduling** → a new `ua/core/scheduler.py` that calls `agent.chat()` on a timer, same as any interface.
+- **Future modalities (TTS, STT/speech-to-text, vision, avatar/animation control, game-playing agents)** → explicitly deferred. When eventually built, each gets its own parallel manager/adapter pair (e.g. `TTSManager`/`TTSAdapter`, `VisionManager`/`VisionAdapter`) with method signatures shaped for that modality's I/O (text-in/audio-out, image input, etc.), NOT extensions to `ModelManager`/`LLMAdapter`. Forcing these into `LLMAdapter.generate()`'s text-in/text-out contract would be the wrong abstraction.
 
 ---
 
