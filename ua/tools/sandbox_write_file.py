@@ -19,7 +19,7 @@ class SandboxWriteFileTool(Tool):
     that protection is added.
 
     This tool writes files to a per-project directory on a remote SSH sandbox host.
-    Path traversal attacks are blocked.
+    Path traversal attacks are blocked. Shell metacharacters in paths are also blocked.
     """
 
     name = "sandbox_write_file"
@@ -39,7 +39,7 @@ class SandboxWriteFileTool(Tool):
             },
             "relative_path": {
                 "type": "string",
-                "description": "Path relative to the project directory.",
+                "description": "Path relative to the project directory (no shell metacharacters).",
             },
             "content": {
                 "type": "string",

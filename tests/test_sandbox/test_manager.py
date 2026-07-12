@@ -18,13 +18,25 @@ from ua.sandbox.manager import SSHSandboxManager, SSHSandboxNotConfiguredError
 def _make_mock_connection() -> MagicMock:
     """Create a mock SSH client connection."""
     mock_conn = MagicMock()
-    mock_conn._closed = False
+
+    # Mock the is_closed method (public API, not private _closed attribute)
+    mock_conn.is_closed = MagicMock(return_value=False)
+
     # Mock the run method to return a process result
     mock_process = MagicMock()
     mock_process.exit_status = 0
     mock_process.stdout = "output"
     mock_process.stderr = ""
     mock_conn.run = AsyncMock(return_value=mock_process)
+
+    # Mock SFTP client
+    mock_sftp = MagicMock()
+    mock_sftp.makedirs = AsyncMock()
+    mock_sftp.put = AsyncMock()
+    mock_sftp.__aenter__ = AsyncMock(return_value=mock_sftp)
+    mock_sftp.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.start_sftp_client = MagicMock(return_value=mock_sftp)
+
     return mock_conn
 
 
@@ -33,12 +45,21 @@ def _make_mock_connection_with_result(
 ) -> MagicMock:
     """Create a mock SSH client connection that returns specific results."""
     mock_conn = MagicMock()
-    mock_conn._closed = False
+    mock_conn.is_closed = MagicMock(return_value=False)
     mock_process = MagicMock()
     mock_process.exit_status = exit_status
     mock_process.stdout = stdout
     mock_process.stderr = stderr
     mock_conn.run = AsyncMock(return_value=mock_process)
+
+    # Mock SFTP client
+    mock_sftp = MagicMock()
+    mock_sftp.mkdir = AsyncMock()
+    mock_sftp.put = AsyncMock()
+    mock_sftp.__aenter__ = AsyncMock(return_value=mock_sftp)
+    mock_sftp.__aexit__ = AsyncMock(return_value=None)
+    mock_conn.start_sftp_client = MagicMock(return_value=mock_sftp)
+
     return mock_conn
 
 
@@ -92,7 +113,7 @@ async def test_ensure_project_dir_rejects_invalid_project_id():
 
 @pytest.mark.asyncio
 async def test_write_file_success_via_mocked_ssh():
-    """Test that write_file successfully writes content via SSH."""
+    """Test that write_file successfully writes content via SFTP."""
     settings = Settings(sandbox_host="sandbox.example.com")
     mgr = SSHSandboxManager(settings=settings)
 
@@ -104,10 +125,8 @@ async def test_write_file_success_via_mocked_ssh():
 
         # Verify connection was established
         mock_connect.assert_called_once()
-        # Verify file write was called (parent dir is same as project for flat path)
-        assert mock_conn.run.called
-        args = mock_conn.run.call_args[0][0]
-        assert "base64" in args  # Uses base64 encoding
+        # Verify SFTP was used
+        assert mock_conn.start_sftp_client.called
 
 
 @pytest.mark.asyncio
@@ -128,6 +147,53 @@ async def test_write_file_path_traversal_rejected():
             with pytest.raises(ValueError) as exc_info:
                 await mgr.write_file("test-project", traversal_path, "malicious content")
             assert "Path traversal" in str(exc_info.value)
+
+
+@pytest.mark.asyncio
+async def test_write_file_shell_metacharacters_rejected():
+    """Test that shell metacharacters in relative_path are rejected.
+
+    This prevents command injection via paths like 'foo; touch /tmp/pwned'.
+    Note: Some of these may be caught by path traversal first (like ..),
+    so we check for either rejection message.
+    """
+    settings = Settings(sandbox_host="sandbox.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    # Test paths that contain shell metacharacters but NO path traversal
+    shell_metachar_paths = [
+        "foo; touch /tmp/pwned",
+        "foo$(whoami)",
+        "foo`id`",
+        "foo|cat /etc/passwd",
+        "foo && echo pwned",
+        "file>output",
+        "file<output",
+    ]
+
+    for injection_path in shell_metachar_paths:
+        with patch("asyncssh.connect", new_callable=AsyncMock):
+            with pytest.raises(ValueError) as exc_info:
+                await mgr.write_file(
+                    "test-project", injection_path, "malicious content"
+                )
+            # Should be rejected - either for shell metacharacters or path traversal
+            error_msg = str(exc_info.value)
+            assert (
+                "Shell metacharacters" in error_msg or "Path traversal" in error_msg
+            ), f"Path {injection_path} was not rejected: {error_msg}"
+
+
+@pytest.mark.asyncio
+async def test_write_file_null_byte_rejected():
+    """Test that null bytes in relative_path are rejected."""
+    settings = Settings(sandbox_host="sandbox.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    with patch("asyncssh.connect", new_callable=AsyncMock):
+        with pytest.raises(ValueError) as exc_info:
+            await mgr.write_file("test-project", "foo\x00bar", "content")
+        assert "Null byte" in str(exc_info.value)
 
 
 @pytest.mark.asyncio
@@ -161,7 +227,7 @@ async def test_execute_respects_timeout():
 
     with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
         mock_conn = MagicMock()
-        mock_conn._closed = False
+        mock_conn.is_closed = MagicMock(return_value=False)
         mock_conn.run = AsyncMock(side_effect=slow_run)
         mock_connect.return_value = mock_conn
 

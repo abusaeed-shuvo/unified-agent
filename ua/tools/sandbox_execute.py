@@ -18,6 +18,12 @@ class SandboxExecuteTool(Tool):
     Do not expose this tool to an agent with real autonomy against a real host until
     that protection is added.
 
+    KNOWN RISKS:
+    - Symlink Escape Risk: Does NOT check for symlinks within the project directory.
+      An agent could create symlinks to escape the sandbox (e.g., 'ln -s /etc').
+      Combined with shell expansion, this could allow access to files outside
+      the sandbox. This will be addressed in a future batch.
+
     This tool runs shell commands in a per-project directory on a remote SSH sandbox host.
     """
 
@@ -27,7 +33,8 @@ class SandboxExecuteTool(Tool):
         "WARNING: This tool currently has NO destructive-command detection or "
         "confirmation gating (planned for a future batch). Any command can be "
         "executed without confirmation. Do not expose this tool to an agent with "
-        "real autonomy against a real host until that protection is added."
+        "real autonomy against a real host until that protection is added. "
+        "Symlink escape risk also exists - see tool docstring for details."
     )
     parameters = {
         "type": "object",

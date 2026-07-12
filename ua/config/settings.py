@@ -21,7 +21,14 @@ class Settings(BaseSettings):
     # These are optional and unset by default. If not configured, sandbox tools
     # will fail closed (return error without attempting connections).
     sandbox_host: str | None = None
-    """Hostname or IP address of the SSH sandbox server. If None, sandbox tools are disabled."""
+    """Hostname or IP address of the SSH sandbox server. If None, sandbox tools
+    are disabled.
+
+    SECURITY WARNING: The SSH connection uses known_hosts=None, which accepts
+    any host key and is vulnerable to MITM attacks. This is intentional for
+    sandbox use where the host is disposable and operated by the user, but
+    should only be enabled with a trusted, isolated sandbox host.
+    """
     sandbox_port: int = 22
     """SSH port for the sandbox server (default 22)."""
     sandbox_username: str | None = None

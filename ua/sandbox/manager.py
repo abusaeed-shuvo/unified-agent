@@ -2,13 +2,22 @@
 
 This module provides SSHSandboxManager which manages SSH connections to a remote
 sandbox host and provides file/execution operations within per-project directories.
+
+KNOWN RISKS AND TRADEOFFS:
+- MITM Vulnerability: known_hosts=None accepts any host key. This is intentional
+  for sandbox use where the host is disposable and operated by the user, but means
+  a malicious actor could intercept connections. See .env.example for warning.
+- Symlink Escape Risk: The execute() method does NOT check for symlinks within
+  the project directory. Combined with the lack of destructive-command detection
+  (planned for Batch 35), this could allow privilege escalation or data access
+  outside the sandbox.
 """
 
 from __future__ import annotations
 
 import asyncio
-import base64
 import re
+import tempfile
 from pathlib import Path
 
 import asyncssh
@@ -33,6 +42,18 @@ class SSHSandboxManager:
     - Fail-closed behavior when the host is unreachable
 
     The manager reuses a single SSH connection across multiple calls.
+
+    KNOWN RISKS AND TRADEOFFS:
+    - MITM Vulnerability: known_hosts=None accepts any host key. This is intentional
+      for sandbox use where the host is disposable and operated by the user, but means
+      a malicious actor could intercept connections. See .env.example for warning.
+    - Symlink Escape Risk: The execute() method does NOT check for symlinks within
+      the project directory. Combined with the lack of destructive-command detection
+      (planned for Batch 35), this could allow privilege escalation or data access
+      outside the sandbox.
+    - Command Injection Risk: The execute() method runs arbitrary shell commands.
+      No destructive-command detection or confirmation gating exists yet
+      (planned for Batch 35).
     """
 
     BASE_DIR = "/home/sandbox/projects"
@@ -69,7 +90,8 @@ class SSHSandboxManager:
                 "Sandbox host not configured. Set UA_SANDBOX_HOST environment variable."
             )
 
-        if self._connection is None or self._connection._closed:
+        # Use the public is_closed() method instead of private _closed attribute
+        if self._connection is None or self._connection.is_closed():
             try:
                 self._connection = await asyncssh.connect(
                     host=self._settings.sandbox_host,
@@ -78,7 +100,7 @@ class SSHSandboxManager:
                     client_keys=[self._settings.sandbox_key_path]
                     if self._settings.sandbox_key_path
                     else None,
-                    known_hosts=None,  # Accept any host key (for sandbox use)
+                    known_hosts=None,  # See class docstring for MITM warning
                 )
             except Exception as exc:
                 raise SSHSandboxConnectionError(
@@ -109,6 +131,42 @@ class SSHSandboxManager:
             )
         return project_id
 
+    def _validate_relative_path(self, relative_path: str) -> str:
+        """Validate and sanitize a relative path for file operations.
+
+        Path must not contain:
+        - Path traversal attempts (../)
+        - Shell metacharacters that could enable command injection
+        - Null bytes
+
+        Args:
+            relative_path: The relative path to validate.
+
+        Returns:
+            The validated relative path.
+
+        Raises:
+            ValueError: If path contains dangerous characters.
+        """
+        # Reject path traversal
+        if ".." in relative_path.split("/") or ".." in relative_path.split("\\"):
+            raise ValueError(f"Path traversal detected in relative_path: {relative_path}")
+
+        # Reject null bytes
+        if "\x00" in relative_path:
+            raise ValueError("Null byte detected in relative_path")
+
+        # Reject shell metacharacters that could enable command injection
+        # when used in shell commands. We use SFTP for file writes, but this
+        # adds defense-in-depth for any future shell-based operations.
+        dangerous_chars = set(";$`|&<>!(){}[]<>*?")
+        if any(char in relative_path for char in dangerous_chars):
+            raise ValueError(
+                f"Shell metacharacters detected in relative_path: {relative_path}"
+            )
+
+        return relative_path
+
     async def ensure_project_dir(self, project_id: str) -> str:
         """Ensure the project directory exists on the remote host.
 
@@ -136,8 +194,8 @@ class SSHSandboxManager:
     ) -> None:
         """Write a file to the project directory on the remote host.
 
-        Path traversal via '../' is blocked. The relative_path is resolved
-        against the project directory and verified to stay within bounds.
+        Uses SFTP for safe file operations, avoiding shell command injection.
+        Path traversal via '../' is blocked.
 
         Args:
             project_id: The project identifier (validated for security).
@@ -150,29 +208,44 @@ class SSHSandboxManager:
             SSHSandboxConnectionError: If connection fails.
         """
         validated_id = self._validate_project_id(project_id)
-
+        validated_path = self._validate_relative_path(relative_path)
         project_path = f"{self.BASE_DIR}/{validated_id}"
 
-        # Sanitize relative_path: reject any path traversal attempt
-        if ".." in relative_path.split("/") or ".." in relative_path.split("\\"):
-            raise ValueError(f"Path traversal detected in relative_path: {relative_path}")
-
-        full_path = f"{project_path}/{relative_path}"
+        full_path = f"{project_path}/{validated_path}"
 
         conn = await self._get_connection()
-        # Create parent directories if needed
-        parent = str(Path(full_path).parent)
-        if parent != project_path:
-            await conn.run(f"mkdir -p {parent}", check=False)
+        async with conn.start_sftp_client() as sftp:
+            # Create parent directories if needed
+            parent_path = str(Path(full_path).parent)
+            if parent_path != project_path:
+                # Use SFTP makedirs for safe directory creation
+                await sftp.makedirs(parent_path, exist_ok=True)
 
-        # Write the file using base64 encoding to handle any content safely
-        encoded = base64.b64encode(content.encode()).decode()
-        await conn.run(f"echo {encoded} | base64 -d > {full_path}", check=False)
+            # Write file using SFTP - safe from command injection
+            # Use a temp file approach for atomic writes
+            with tempfile.NamedTemporaryFile("w", delete=False) as tmp:
+                tmp.write(content)
+                tmp_path = tmp.name
+
+            try:
+                await sftp.put(tmp_path, full_path)
+            finally:
+                Path(tmp_path).unlink(missing_ok=True)
 
     async def execute(
         self, project_id: str, command: str, timeout: float = 60.0
     ) -> tuple[int, str, str]:
         """Execute a command in the project directory on the remote host.
+
+        WARNING: This method has NO destructive-command detection or confirmation
+        gating (planned for Batch 35). Any command can be executed without confirmation.
+        Do not expose this tool to an agent with real autonomy against a real host
+        until that protection is added.
+
+        KNOWN RISKS:
+        - Symlink Escape Risk: Does NOT check for symlinks within the project
+          directory. A symlink like 'ln -s /etc' followed by shell expansion
+          could allow access to files outside the sandbox.
 
         Args:
             project_id: The project identifier.
