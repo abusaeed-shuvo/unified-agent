@@ -71,11 +71,59 @@ Batches within the same indentation level (e.g., 08/09/10, or 22/23/24) can be d
 
 This gets to a genuinely useful, multi-interface, tool-using agent by the end of Phase 4 (batch 24), with Phase 5 turning it into something production-respectable.
 
----
 
-## 4. Implementation Batches
 
 ---
+
+## Project Milestones (Completed / Planned)
+
+This section provides a high-level overview of development progress for public visibility. The detailed batch specifications follow below.
+
+### Foundations (Batches 1-6, 12) ✓
+- Project scaffold and pyproject.toml setup
+- Pydantic-based configuration system with env-var overrides
+- Central logging setup (idempotent)
+- Async SQLAlchemy engine and ORM models
+- Personality schema, loader, and three personalities (assistant/tester/coding)
+
+### Model & Memory Layers (Batches 7-14) ✓
+- Four LLM adapters: Fake, LM Studio, Ollama, OpenAI-compatible
+- Model Manager with provider selection via config
+- Three-tier memory system: Short-Term, Long-Term, Knowledge
+- Memory Manager facade unifying all layers
+
+### Tools (Batches 15-18, 25) ✓
+- Tool ABC, ToolResult, and ToolRegistry with auto-discovery
+- Calculator tool (safe AST-based evaluation)
+- Filesystem tool (read-only, path traversal protection)
+- Web Search tool (DuckDuckGo HTML scraping, no API key)
+- Web Fetch tool (URL fetching with SSRF protection — see known limitations)
+- SSH Sandbox tools (execute/write) with confirmation gating (partial)
+
+### Orchestration (Batches 19-21) ✓
+- Context Builder merging personality + memory into prompts
+- Conversation Manager with session/turn bookkeeping
+- UnifiedAgent: the single `agent.chat()` public entrypoint
+
+### Interfaces (Batches 22-24) ✓
+- CLI interface with interactive chat loop
+- Web API interface (FastAPI) with /chat endpoint
+- Discord bot interface
+
+### Hardening & Polish (Batches 25-30) ✓
+- Bounded tool-calling loop with retry limits
+- LLM call retry/backoff layer
+- Memory summarization/compaction hooks
+- Per-user personality hot-switching
+- Structured logging for observability
+
+### Examples & Docs (Batches 31-33) ✓
+- Runnable example scripts demonstrating usage patterns
+- Complete documentation suite in docs/
+- Packaging and distribution readiness
+
+---
+
 
 ### Batch 01 — Project Scaffold
 

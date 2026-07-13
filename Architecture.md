@@ -46,7 +46,7 @@ Everything downstream of that call is the AI Core's problem.
 │                               │                                  │
 │  ┌────────────────────────────▼───────────────────────────────┐ │
 │  │                       Tool System                            │ │
-│  │   calculator │ filesystem │ browser │ terminal │ ...          │ │
+│  │   calculator │ filesystem │ web_search │ web_fetch │ sandbox_execute │ sandbox_write_file │ ... │ │
 │  └───────────────────────────────────────────────────────────┘ │
 └───────────────────────────────────────────────────────────────┘
 ```
@@ -157,11 +157,16 @@ unified-agent/
 │   │   ├── __init__.py
 │   │   ├── base.py                   # Tool ABC + ToolResult
 │   │   ├── registry.py               # auto-discovery + registration
-│   │   ├── calculator.py
-│   │   └── filesystem.py
+│   │   ├── calculator.py             # Safe arithmetic evaluation
+│   │   ├── filesystem.py             # Read-only filesystem access
+│   │   ├── web_search.py             # DuckDuckGo HTML scraping
+│   │   ├── web_fetch.py              # URL fetch with SSRF caveats
+│   │   ├── sandbox_execute.py        # SSH remote execution
+│   │   └── sandbox_write_file.py     # SSH remote file write
 │   ├── core/
 │   │   ├── __init__.py
-│   │   └── agent.py                  # UnifiedAgent — the single public entrypoint
+│   │   ├── agent.py                  # UnifiedAgent — the single public entrypoint
+│   │   └── factory.py                # build_default_agent() helper
 │   └── interfaces/
 │       ├── __init__.py
 │       ├── cli/
@@ -170,12 +175,18 @@ unified-agent/
 │       │   └── bot.py
 │       └── web/
 │           └── api.py                # FastAPI app
+├── sandbox/
+│   ├── __init__.py
+│   ├── manager.py                    # SSHSandboxManager
+│   └── risk_detection.py             # Blacklisted command patterns
+├── web/
+│   ├── __init__.py
+│   ├── search_backend.py             # DuckDuckGo scraping
+│   └── ssrf_guard.py                # SSRF validation (see limitations)
 ├── personalities/
-│   └── assistant/
-│       ├── system.md
-│       ├── style.md
-│       ├── rules.json
-│       └── greetings.txt
+│   ├── assistant/                    # General helper (calculator)
+│   ├── tester/                       # Testing use (calculator, filesystem)
+│   └── coding/                       # Coding assistant (full tool set)
 ├── tests/
 │   ├── conftest.py
 │   ├── test_config.py
@@ -184,11 +195,18 @@ unified-agent/
 │   ├── test_memory/
 │   ├── test_conversation/
 │   ├── test_tools/
-│   └── test_core/
+│   ├── test_sandbox/
+│   └── test_web/
 ├── docs/
-│   └── (generated/expanded docs)
+│   ├── getting-started.md
+│   ├── writing-a-tool.md
+│   ├── writing-a-personality.md
+│   └── writing-an-adapter.md
 └── examples/
-    └── minimal_cli_chat.py
+    ├── minimal_cli_chat.py
+    ├── custom_tool_example.py
+    ├── switch_personality.py
+    └── sandbox_and_web_tools_demo.py
 ```
 
 ---
@@ -304,3 +322,50 @@ The layering above is deliberately built so these require **additive**, not stru
 - No Docker/Kubernetes packaging.
 
 These are explicitly deferred so early batches stay small and verifiable.
+
+---
+
+## 14. Execution Model
+
+The Tool System currently supports one execution mode:
+
+```mermaid
+graph LR
+    subgraph "Current: SSH Sandbox Only"
+        SSH[SSH Sandbox Host]
+        subgraph "Tools on Remote"
+            SE[Sandbox Execute]
+            SWF[Sandbox Write File]
+        end
+        UA[Unified Agent] -->|SSH| SSH
+        SSH --> SE
+        SSH --> SWF
+    end
+    
+    style SSH fill:#e1f5fe
+    style UA fill:#f3e5f5
+```
+
+### Available Execution Capabilities
+
+| Mode | Status | Location | Notes |
+|------|--------|----------|-------|
+| Local code execution | Not Implemented | N/A | There is no tool that executes code on the same machine as the agent process. All execution-capable tools use SSH. |
+| SSH Sandbox Execution | Implemented | `ua/tools/sandbox_execute.py` | Requires configured `UA_SANDBOX_HOST`. Has CLI confirmation gating for blacklisted patterns (sudo, rm -rf, etc.). Web API/Discord interfaces auto-reject risky commands. |
+| SSH Sandbox File Write | Implemented | `ua/tools/sandbox_write_file.py` | Requires configured `UA_SANDBOX_HOST`. **No confirmation gating** - see security warnings in the tool's docstring. |
+| SSH Connection Security | Partial | `ua/sandbox/manager.py` | Uses `known_hosts=None` (MITM vulnerable) - intentional for disposable sandbox hosts. |
+
+### Security Boundaries
+
+- **The SSH sandbox host must be disposable and isolated** - treat it as an ephemeral VM/container
+- **sandbox_execute** uses a blacklist-based risk detector (`ua/sandbox/risk_detection.py`) with CLI confirmation; this is defense-in-depth, not a security guarantee
+- **sandbox_write_file** has NO confirmation gating - it will write any file the agent requests
+- **No local execution exists** - if you need to run code on the agent's own machine, that capability is not yet implemented
+
+### Planned Execution Providers (Future Work)
+
+| Provider | Status | Notes |
+|----------|--------|-------|
+| Docker execution | Not Implemented | Would allow containerized tool execution; design would follow a similar pattern to SSH (tool calls through a manager) |
+| Local execution | Not Implemented | Would require significant security hardening before being exposed to LLM control |
+
