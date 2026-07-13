@@ -40,16 +40,6 @@ async def test_execute_tool_fails_closed_when_unconfigured():
 
 
 @pytest.mark.asyncio
-async def test_execute_tool_description_contains_no_confirmation_warning():
-    """Test that the tool description contains the required warning."""
-    # Check for the warning text (may be split across lines in docstring)
-    warning_fragment = "WARNING: This tool currently has NO destructive-command"
-
-    assert warning_fragment in SandboxExecuteTool.description
-    assert warning_fragment in (SandboxExecuteTool.__doc__ or "")
-
-
-@pytest.mark.asyncio
 async def test_execute_tool_not_auto_discovered_by_registry():
     """Test that SandboxExecuteTool requires register_instance(), consistent with FilesystemTool."""
     registry = ToolRegistry()
@@ -73,3 +63,113 @@ async def test_execute_tool_not_auto_discovered_by_registry():
 
         # Now it should be registered
         assert "sandbox_execute" in [t.name for t in registry._tools.values()]
+
+
+# ---------------------------------------------------------------------------
+# Batch 35 Tests: Confirmation gating for risky commands
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_risky_command_auto_rejected_when_no_callback():
+    """Risky command with no callback is auto-rejected, execute() never called."""
+    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
+
+    # Tool without callback
+    tool = SandboxExecuteTool(sandbox_manager=mock_mgr)
+    result = await tool.run(project_id="test", command="rm -rf /tmp/x")
+
+    assert result.success is False
+    assert "rejected" in result.error.lower()
+    assert "confirmation" in result.error.lower()
+    # Critical: execute() was NEVER called
+    mock_mgr.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_risky_command_proceeds_when_callback_confirms():
+    """Risky command with confirming callback proceeds to execute."""
+    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
+
+    async def confirm(cmd: str, reason: str) -> bool:
+        return True
+
+    tool = SandboxExecuteTool(sandbox_manager=mock_mgr, confirmation_callback=confirm)
+    result = await tool.run(project_id="test", command="rm -rf /tmp/x")
+
+    assert result.success is True
+    assert result.output == "output"
+    mock_mgr.execute.assert_called_once()
+
+
+@pytest.mark.asyncio
+async def test_risky_command_rejected_when_callback_denies():
+    """Risky command with denying callback is rejected."""
+    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
+
+    async def deny(cmd: str, reason: str) -> bool:
+        return False
+
+    tool = SandboxExecuteTool(sandbox_manager=mock_mgr, confirmation_callback=deny)
+    result = await tool.run(project_id="test", command="rm -rf /tmp/x")
+
+    assert result.success is False
+    assert "rejected" in result.error.lower()
+    mock_mgr.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_risky_command_rejected_when_callback_raises_exception():
+    """Callback that raises exception is treated as denial (fail-closed)."""
+    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
+
+    async def raise_error(cmd: str, reason: str) -> bool:
+        raise RuntimeError("Oops")
+
+    tool = SandboxExecuteTool(sandbox_manager=mock_mgr, confirmation_callback=raise_error)
+    result = await tool.run(project_id="test", command="rm -rf /tmp/x")
+
+    assert result.success is False
+    assert "rejected" in result.error.lower()
+    mock_mgr.execute.assert_not_called()
+
+
+@pytest.mark.asyncio
+async def test_non_risky_command_executes_without_invoking_callback():
+    """Non-risky command executes immediately without invoking callback at all."""
+    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
+
+    call_tracker = []
+
+    async def tracked_callback(cmd: str, reason: str) -> bool:
+        call_tracker.append(cmd)
+        return True
+
+    tool = SandboxExecuteTool(sandbox_manager=mock_mgr, confirmation_callback=tracked_callback)
+    result = await tool.run(project_id="test", command="ls -la")
+
+    assert result.success is True
+    mock_mgr.execute.assert_called_once()
+    # Callback was NEVER called
+    assert len(call_tracker) == 0
+
+
+# ---------------------------------------------------------------------------
+# Batch 35 Test: Updated tool documentation verification
+# ---------------------------------------------------------------------------
+
+
+def test_tool_has_confirmation_gating_documentation():
+    """Verify SandboxExecuteTool's docstring mentions confirmation gating (CLI-only)."""
+    # The class docstring should mention CLI and that Web/Discord reject risky commands
+    docstring = SandboxExecuteTool.__doc__ or ""
+    assert "confirmation" in docstring.lower()
+    assert "cli" in docstring.lower()
+    assert "web api" in docstring.lower() or "discord" in docstring.lower()
+    # The description should mention confirmation
+    assert "confirmation" in SandboxExecuteTool.description.lower()

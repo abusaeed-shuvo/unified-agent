@@ -1,22 +1,38 @@
 """Execute commands within a remote sandbox project directory.
 
-WARNING: This tool currently has NO destructive-command detection or confirmation
-gating (planned for a future batch). Any command can be executed without confirmation.
-Do not expose this tool to an agent with real autonomy against a real host until
-that protection is added.
+This tool has destructive-command detection and confirmation gating. Risky commands
+require user confirmation when running via the CLI interface. Other interfaces
+(Web API, Discord) automatically reject risky commands since no synchronous prompt
+is available.
+
+IMPORTANT: The confirmation gating is a DEFENSE-IN-DEPTH measure, NOT a primary
+security boundary. Risk detection uses blacklist-based pattern matching which is NOT
+exhaustive - a sufficiently obfuscated or unusual command can evade detection.
+The real safety net is the disposability of the SSH sandbox host itself.
+
+KNOWN RISKS:
+- Symlink Escape Risk: Does NOT check for symlinks within the project directory.
+  An agent could create symlinks to escape the sandbox (e.g., 'ln -s /etc').
+  Combined with shell expansion, this could allow access to files outside
+  the sandbox. This will be addressed in a future batch.
 """
 
+from __future__ import annotations
+
+from collections.abc import Awaitable, Callable
+
 from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.risk_detection import is_risky_command
 from ua.tools.base import Tool, ToolResult
 
 
 class SandboxExecuteTool(Tool):
     """Execute commands within a remote sandbox project directory.
 
-    WARNING: This tool currently has NO destructive-command detection or confirmation
-    gating (planned for a future batch). Any command can be executed without confirmation.
-    Do not expose this tool to an agent with real autonomy against a real host until
-    that protection is added.
+    This tool has destructive-command detection and confirmation gating. Risky commands
+    require user confirmation when running via the CLI interface. Other interfaces
+    (Web API, Discord) automatically reject risky commands since no synchronous prompt
+    is available.
 
     KNOWN RISKS:
     - Symlink Escape Risk: Does NOT check for symlinks within the project directory.
@@ -30,10 +46,7 @@ class SandboxExecuteTool(Tool):
     name = "sandbox_execute"
     description = (
         "Execute a shell command within a remote sandbox project directory. "
-        "WARNING: This tool currently has NO destructive-command detection or "
-        "confirmation gating (planned for a future batch). Any command can be "
-        "executed without confirmation. Do not expose this tool to an agent with "
-        "real autonomy against a real host until that protection is added. "
+        "Risky commands (rm -rf, sudo, dd, etc.) require confirmation. "
         "Symlink escape risk also exists - see tool docstring for details."
     )
     parameters = {
@@ -56,15 +69,23 @@ class SandboxExecuteTool(Tool):
         "required": ["project_id", "command"],
     }
 
-    def __init__(self, sandbox_manager: SSHSandboxManager) -> None:
+    def __init__(
+        self,
+        sandbox_manager: SSHSandboxManager,
+        confirmation_callback: Callable[[str, str], Awaitable[bool]] | None = None,
+    ) -> None:
         """Initialize the sandbox execute tool.
 
         Args:
             sandbox_manager: An SSHSandboxManager instance for remote operations.
-                           This is a required constructor argument and the tool
-                           cannot be auto-discovered.
+                            This is a required constructor argument and the tool
+                            cannot be auto-discovered.
+            confirmation_callback: Optional async callback for confirming risky commands.
+                                  Receives (command, reason) when a risky pattern
+                                  is detected. If None, risky commands are auto-rejected.
         """
         self._sandbox_manager = sandbox_manager
+        self._confirmation_callback = confirmation_callback
 
     async def run(
         self, project_id: str, command: str, timeout: float = 60.0
@@ -80,6 +101,39 @@ class SandboxExecuteTool(Tool):
             ToolResult with success=True and the command output,
             or success=False with an error message.
         """
+        # Check for risky command patterns
+        is_risky, risk_reason = is_risky_command(command)
+
+        if is_risky:
+            # No callback available (Web API, Discord, or default) - reject automatically
+            if self._confirmation_callback is None:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"Command '{command}' was rejected because confirmation is not "
+                        f"available on this interface. Risk detected: {risk_reason}"
+                    ),
+                )
+
+            # Try to get confirmation via callback - fail closed on any error
+            try:
+                confirmed = await self._confirmation_callback(command, risk_reason)
+            except Exception:
+                # Callback raised an exception - treat as denial
+                confirmed = False
+
+            if not confirmed:
+                return ToolResult(
+                    success=False,
+                    output="",
+                    error=(
+                        f"Command '{command}' was rejected: confirmation required "
+                        f"and not received. Risk detected: {risk_reason}"
+                    ),
+                )
+
+        # Execute the command
         try:
             exit_code, stdout, stderr = await self._sandbox_manager.execute(
                 project_id, command, timeout
