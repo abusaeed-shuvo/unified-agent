@@ -10,6 +10,7 @@ from __future__ import annotations
 import time
 
 from ua.config.logging import get_logger
+from ua.config.settings import Settings, get_settings
 from ua.conversation.context_builder import ContextBuilder
 from ua.conversation.manager import ConversationManager
 from ua.database.engine import init_db
@@ -33,6 +34,7 @@ class UnifiedAgent:
         model_manager: ModelManager,
         tool_registry: ToolRegistry,
         personality_name: str,
+        settings: Settings | None = None,
     ) -> None:
         """Initialise the UnifiedAgent.
 
@@ -42,12 +44,14 @@ class UnifiedAgent:
             model_manager: ModelManager for LLM provider delegation.
             tool_registry: ToolRegistry for tool discovery and execution.
             personality_name: Name of the personality to use (e.g. "assistant").
+            settings: Optional Settings instance. If not provided, uses get_settings().
         """
         self._conversation = conversation
         self._context_builder = context_builder
         self._model_manager = model_manager
         self._tool_registry = tool_registry
         self._personality_name = personality_name
+        self._settings = settings if settings is not None else get_settings()
         # The agent needs a MemoryManager to resolve and persist per-user
         # personality preferences. It reaches it through the public
         # ``memory`` property on ConversationManager rather than touching a
@@ -84,6 +88,10 @@ class UnifiedAgent:
              ``MemoryManager.remember_fact(user_id, "active_personality", name)``.
           3. This agent's own default ``self._personality_name`` (set at
              construction).
+
+        Round limit resolution order:
+          1. The resolved personality's own max_tool_call_rounds, if set (not None).
+          2. The global Settings.max_tool_call_rounds fallback.
 
         Sticky behavior: when ``personality_override`` is provided and used, it
         is ALSO persisted as the new per-user preference via
@@ -139,11 +147,26 @@ class UnifiedAgent:
             resolved_personality, context, message
         )
 
+        # Resolve the effective round budget: personality override > global default
+        max_rounds = self._settings.max_tool_call_rounds
+        try:
+            # Load the personality's rules to check for override
+            personality_rules = self._context_builder.personality_loader.load(
+                resolved_personality
+            ).rules
+            if personality_rules.max_tool_call_rounds is not None:
+                max_rounds = personality_rules.max_tool_call_rounds
+        except Exception as exc:
+            # Fail gracefully: if personality loading fails, fall back to global default
+            self._logger.warning(
+                f"Failed to load personality '{resolved_personality}' for "
+                f"max_tool_call_rounds resolution: {exc}. Using global default."
+            )
+
         # Step 3: Get tool schemas from the registry
         tool_schemas = self._tool_registry.all_schemas()
 
         # Step 4: Bounded loop for tool calls
-        max_rounds = self._model_manager._settings.max_tool_call_rounds
         round_count = 0
         response = None
 

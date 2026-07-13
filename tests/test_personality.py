@@ -106,3 +106,78 @@ class TestPersonalityLoader:
         loader = PersonalityLoader(base_dir=base)
         personality = loader.load("greeting_test")
         assert personality.greetings == ["Hello!", "Hi there!", "Greetings!"]
+
+
+# ---------------------------------------------------------------------------
+# Batch 36 Tests: max_tool_call_rounds field
+# ---------------------------------------------------------------------------
+
+
+class TestPersonalityRulesMaxToolCallRounds:
+    """Tests for the max_tool_call_rounds optional field on PersonalityRules."""
+
+    def test_personality_rules_max_tool_call_rounds_defaults_to_none(
+        self, tmp_path: Path
+    ) -> None:
+        """PersonalityRules without max_tool_call_rounds set defaults to None."""
+        base = tmp_path / "personalities"
+        pdir = base / "test_persona"
+        pdir.mkdir(parents=True)
+        (pdir / "system.md").write_text("System prompt.", encoding="utf-8")
+        (pdir / "style.md").write_text("Style guide.", encoding="utf-8")
+        # rules.json without max_tool_call_rounds
+        (pdir / "rules.json").write_text(
+            json.dumps({"allow_tools": [], "max_response_tokens": 1024, "forbidden_topics": []}),
+            encoding="utf-8",
+        )
+        (pdir / "greetings.txt").write_text("Hello!", encoding="utf-8")
+
+        loader = PersonalityLoader(base_dir=base)
+        personality = loader.load("test_persona")
+        assert personality.rules.max_tool_call_rounds is None
+
+    def test_personality_rules_max_tool_call_rounds_can_be_set(
+        self, tmp_path: Path
+    ) -> None:
+        """PersonalityRules.max_tool_call_rounds can be set to a specific value."""
+        base = tmp_path / "personalities"
+        pdir = base / "test_persona"
+        pdir.mkdir(parents=True)
+        (pdir / "system.md").write_text("System prompt.", encoding="utf-8")
+        (pdir / "style.md").write_text("Style guide.", encoding="utf-8")
+        (pdir / "rules.json").write_text(
+            json.dumps({
+                "allow_tools": [],
+                "max_response_tokens": 1024,
+                "forbidden_topics": [],
+                "max_tool_call_rounds": 25
+            }),
+            encoding="utf-8",
+        )
+        (pdir / "greetings.txt").write_text("Hello!", encoding="utf-8")
+
+        loader = PersonalityLoader(base_dir=base)
+        personality = loader.load("test_persona")
+        assert personality.rules.max_tool_call_rounds == 25
+
+    def test_coding_personality_loads_successfully_with_expected_rules_values(
+        self, loader: PersonalityLoader
+    ) -> None:
+        """The 'coding' personality loads correctly with expected rules values."""
+        personality = loader.load("coding")
+        assert isinstance(personality, Personality)
+        assert personality.name == "coding"
+        assert personality.system_prompt
+        assert personality.style
+        assert isinstance(personality.rules, PersonalityRules)
+
+        # Verify specific rules values
+        assert "calculator" in personality.rules.allow_tools
+        assert "sandbox_write_file" in personality.rules.allow_tools
+        assert "sandbox_execute" in personality.rules.allow_tools
+        assert personality.rules.max_response_tokens == 4096
+        assert personality.rules.forbidden_topics == []
+        assert personality.rules.max_tool_call_rounds == 25
+
+        # Verify greetings
+        assert len(personality.greetings) > 0

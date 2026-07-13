@@ -9,6 +9,7 @@ class PersonalityRules(BaseModel):
     allow_tools: list[str] = []
     max_response_tokens: int = 1024
     forbidden_topics: list[str] = []
+    max_tool_call_rounds: int | None = None
 
 
 class Personality(BaseModel):

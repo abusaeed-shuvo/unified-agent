@@ -1,0 +1,6 @@
+{
+	"allow_tools": ["calculator", "sandbox_write_file", "sandbox_execute"],
+	"max_response_tokens": 4096,
+	"forbidden_topics": [],
+	"max_tool_call_rounds": 25
+}

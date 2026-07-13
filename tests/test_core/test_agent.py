@@ -10,7 +10,7 @@ import os
 os.environ.setdefault("UA_DATABASE_URL", "sqlite+aiosqlite:///:memory:")
 os.environ.setdefault("UA_LLM_PROVIDER", "fake")
 
-from unittest.mock import patch
+from unittest.mock import MagicMock, patch
 
 import pytest
 import pytest_asyncio
@@ -113,10 +113,12 @@ def _build_test_agent(
     # Important: reset the global engine cache so init_db() uses our in-memory URL
     # This prevents a real unified_agent.db file from being created in the repo root
     import ua.database.engine as engine_mod
+
     engine_mod._engine = None
     engine_mod._session_factory = None
     # Also clear settings cache to ensure fresh settings are used
     from ua.config.settings import get_settings
+
     get_settings.cache_clear()
 
     return UnifiedAgent(
@@ -125,6 +127,7 @@ def _build_test_agent(
         model_manager=model_manager,
         tool_registry=tool_registry,
         personality_name="assistant",
+        settings=settings,
     )
 
 
@@ -441,9 +444,7 @@ async def test_chat_stops_at_max_rounds_when_model_keeps_requesting_tools(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(
-        max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:"
-    )
+    settings = Settings(max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:")
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -486,9 +487,7 @@ async def test_chat_logs_warning_when_round_limit_hit(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(
-        max_tool_call_rounds=1, database_url="sqlite+aiosqlite:///:memory:"
-    )
+    settings = Settings(max_tool_call_rounds=1, database_url="sqlite+aiosqlite:///:memory:")
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -535,9 +534,7 @@ async def test_chat_at_round_limit_does_not_raise_exception(
     ]
 
     fake = FakeAdapter(responses=responses)
-    settings = Settings(
-        max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:"
-    )
+    settings = Settings(max_tool_call_rounds=2, database_url="sqlite+aiosqlite:///:memory:")
 
     agent = _build_test_agent(
         conversation_manager=conversation_manager,
@@ -785,13 +782,11 @@ async def test_chat_logs_info_level_lifecycle_events(
 
     # Turn start and turn completion markers must be present at INFO.
     assert any(
-        "chat() started for user_id=log_lifecycle_user" in rec.message
-        and rec.levelname == "INFO"
+        "chat() started for user_id=log_lifecycle_user" in rec.message and rec.levelname == "INFO"
         for rec in caplog.records
     )
     assert any(
-        "chat() completed in" in rec.message and rec.levelname == "INFO"
-        for rec in caplog.records
+        "chat() completed in" in rec.message and rec.levelname == "INFO" for rec in caplog.records
     )
     # At least one LLM generate() duration line must be present.
     assert any(
@@ -964,3 +959,207 @@ async def test_multi_turn_conversation_no_duplication(
     assert user_messages[0].content == "first message"
     assert user_messages[1].content == "second message"
     assert user_messages[2].content == "third message"
+
+
+# ---------------------------------------------------------------------------
+# Batch 36 Tests: Personality-level tool-call round budget override
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_global_round_limit_when_personality_has_no_override(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """Personality without max_tool_call_rounds uses global Settings value."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # Create responses that would exceed any reasonable limit if not bounded
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id=f"c{i}", name="calculator", arguments={"expression": f"{i}+{i}"})
+            ],
+        )
+        for i in range(10)
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    # Global default is 3
+    settings = Settings(
+        max_tool_call_rounds=3,
+        database_url="sqlite+aiosqlite:///:memory:",
+    )
+
+    # Agent uses "coding" personality which has an override, but we're testing
+    # with "assistant" which has NO override (defaults to None)
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    response = await agent.chat(
+        user_id="test_user_global_limit",
+        platform="test",
+        message="Do some math",
+    )
+
+    # Should stop at exactly 3 calls (the global limit)
+    assert fake._call_count == 3
+    assert response == "I wasn't able to complete that request."
+
+
+@pytest.mark.asyncio
+async def test_chat_uses_personality_round_limit_when_override_set(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+):
+    """Personality with max_tool_call_rounds uses THAT value instead of global default."""
+    from ua.models.fake_adapter import FakeAdapter
+
+    # 19 responses with tool calls, plus a final one without tool calls
+    # With coding's limit of 25, we should complete all 20 rounds
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[
+                ToolCall(id=f"c{i}", name="calculator", arguments={"expression": f"{i}+{i}"})
+            ],
+        )
+        for i in range(19)
+    ] + [
+        LLMResponse(content="Final response"),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    # Global default is 5, but "coding" personality has 25
+    settings = Settings(
+        max_tool_call_rounds=5,  # Different from coding's 25
+        database_url="sqlite+aiosqlite:///:memory:",
+    )
+
+    agent = _build_test_agent(
+        conversation_manager=conversation_manager,
+        context_builder=context_builder,
+        tool_registry=tool_registry,
+        fake_adapter=fake,
+        settings=settings,
+    )
+
+    # Use coding personality which has max_tool_call_rounds=25
+    response = await agent.chat(
+        user_id="test_user_personality_limit",
+        platform="test",
+        message="Do some math",
+        personality_override="coding",
+    )
+
+    # Should stop at 20 (we provided 20 responses), NOT at 5 (global limit)
+    # This proves the personality override is being used
+    assert fake._call_count == 20
+    assert response == "Final response"
+
+
+@pytest.mark.asyncio
+async def test_chat_falls_back_to_global_limit_when_personality_load_fails_and_logs_warning(
+    conversation_manager,
+    context_builder,
+    tool_registry,
+    memory_manager,
+    caplog,
+):
+    """If personality loading fails during round-budget resolution, fall back to global default.
+
+    This tests the graceful fallback when personality_loader.load() raises an exception
+    AFTER the context has already been built successfully (e.g., race condition where
+    personality is deleted between context building and round-budget resolution).
+    """
+    from ua.models.fake_adapter import FakeAdapter
+
+    responses = [
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c1", name="calculator", arguments={"expression": "1+1"})],
+        ),
+        LLMResponse(
+            content="",
+            tool_calls=[ToolCall(id="c2", name="calculator", arguments={"expression": "2+2"})],
+        ),
+    ]
+
+    fake = FakeAdapter(responses=responses)
+    settings = Settings(
+        max_tool_call_rounds=2,
+        database_url="sqlite+aiosqlite:///:memory:",
+    )
+
+    # Use a mutable container to track calls across the closure
+    call_tracker = [0]
+    mock_loader = MagicMock()
+    real_loader = PersonalityLoader()
+    mock_personality = real_loader.load("assistant")
+
+    def side_effect_load(name):
+        call_tracker[0] += 1
+        # First call succeeds (for context building), second fails
+        if call_tracker[0] == 1:
+            return mock_personality
+        raise Exception("Simulated race condition: personality deleted after context build")
+
+    mock_loader.load.side_effect = side_effect_load
+    mock_context_builder = ContextBuilder(personality_loader=mock_loader)
+
+    model_manager = ModelManager(settings=settings)
+    model_manager._adapter = fake
+
+    import ua.database.engine as engine_mod
+
+    engine_mod._engine = None
+    engine_mod._session_factory = None
+    from ua.config.settings import get_settings
+
+    get_settings.cache_clear()
+
+    agent = UnifiedAgent(
+        conversation=conversation_manager,
+        context_builder=mock_context_builder,
+        model_manager=model_manager,
+        tool_registry=tool_registry,
+        personality_name="assistant",
+        settings=settings,
+    )
+
+    with caplog.at_level("WARNING"):
+        response = await agent.chat(
+            user_id="test_user_fallback",
+            platform="test",
+            message="Do some math",
+        )
+
+    # Should log a warning about the failed personality load during round-budget resolution
+    assert any(
+        "Failed to load personality" in record.message
+        and "max_tool_call_rounds resolution" in record.message
+        for record in caplog.records
+    )
+    # Should stop at global limit (2) since personality failed to load for round-budget
+    assert fake._call_count == 2
+    assert response == "I wasn't able to complete that request."
+
+
+def test_unified_agent_does_not_access_model_manager_private_settings():
+    """Verify that UnifiedAgent no longer reaches into ModelManager._settings."""
+    import inspect
+
+    source = inspect.getsource(UnifiedAgent.chat)
+    # The old code had: self._model_manager._settings.max_tool_call_rounds
+    assert "_model_manager._settings" not in source
+    assert "_settings.max_tool_call_rounds" in source

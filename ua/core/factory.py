@@ -102,4 +102,5 @@ def build_default_agent(
         model_manager=model_manager,
         tool_registry=tool_registry,
         personality_name=settings.active_personality,
+        settings=settings,
     )
