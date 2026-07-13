@@ -60,3 +60,13 @@ class TestExamples:
             f"stdout:\n{result.stdout}\n"
             f"stderr:\n{result.stderr}"
         )
+
+    def test_sandbox_and_web_tools_demo_runs_successfully(self) -> None:
+        """sandbox_and_web_tools_demo.py runs to completion with exit code 0."""
+        result = _run_example("examples/sandbox_and_web_tools_demo.py")
+
+        assert result.returncode == 0, (
+            f"Example failed with returncode {result.returncode}\n"
+            f"stdout:\n{result.stdout}\n"
+            f"stderr:\n{result.stderr}"
+        )
