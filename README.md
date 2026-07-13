@@ -128,6 +128,25 @@ Unified Agent uses defense-in-depth security with clear caveats:
 - Host key verification is disabled (`known_hosts=None`) - only use trusted networks
 
 ### Web Fetch Tool
+- Includes SSRF protection against private IP ranges via ssrf_guard.py
+- **DNS rebinding is NOT mitigated** - there's a TOCTOU window between validation and request (applies to redirects too)
+- Redirects handled manually with SSRF re-validation (was a bypass vector, now fixed)
+- Response size limited to 1MB, extracted text truncated to ~5,000 chars
+
+See the docstrings in `ua/tools/sandbox_execute.py`, `ua/tools/sandbox_write_file.py`, and `ua/web/ssrf_guard.py` for full security disclosures.
+
+## Security Philosophy
+
+Unified Agent uses defense-in-depth security with clear caveats:
+
+### SSH Sandbox Tools
+- Require a **disposable remote host** configured via `UA_SANDBOX_HOST`
+- The sandbox host should be isolated and rebuildable - treat it as ephemeral
+- `sandbox_execute` has **blacklisted pattern detection** (sudo, rm -rf, etc.) with CLI confirmation gating
+- `sandbox_write_file` currently has **NO confirmation gating** - see warning in `.env.example`
+- Host key verification is disabled (`known_hosts=None`) - only use trusted networks
+
+### Web Fetch Tool
 - Includes SSRF protection against private IP ranges
 - **DNS rebinding is NOT mitigated** - there's a TOCTOU window between validation and request
 - Redirect following is implemented with per-redirect re-validation
