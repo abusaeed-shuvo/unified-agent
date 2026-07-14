@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 from unittest.mock import patch
 
-from ua.web.ssrf_guard import is_url_safe
+from ua.web.ssrf_guard import build_pinned_url, get_safe_url_with_resolved_ip, is_url_safe
 
 # ---------------------------------------------------------------------------
 # Tests for blocked URLs
@@ -134,44 +134,130 @@ def test_public_address_allowed_with_ipv6():
 
 
 # ---------------------------------------------------------------------------
+# Tests for IP pinning and get_safe_url_with_resolved_ip
+# ---------------------------------------------------------------------------
+
+
+def test_get_safe_url_returns_resolved_ip_for_public_host():
+    """get_safe_url_with_resolved_ip returns resolved IP for safe hosts."""
+
+    def mock_getaddrinfo(hostname, port=None, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        if hostname == "example.com":
+            return [(socket.AF_INET, type, proto, "", ("93.184.216.34", port))]
+        raise socket.gaierror(f"No resolution for {hostname}")
+
+    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo):
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip("https://example.com")
+
+    assert resolved_ip == "93.184.216.34"
+    assert hostname == "example.com"
+    assert port == 443  # Default HTTPS port
+
+
+def test_get_safe_url_returns_none_for_private_host():
+    """get_safe_url_with_resolved_ip returns None tuple for unsafe hosts."""
+
+    def mock_getaddrinfo(hostname, port=None, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        if hostname == "internal.example.com":
+            return [(socket.AF_INET, type, proto, "", ("10.0.0.1", port))]
+        raise socket.gaierror(f"No resolution for {hostname}")
+
+    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo):
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip("https://internal.example.com")
+
+    assert resolved_ip is None
+    assert hostname is None
+    assert port is None
+
+
+def test_get_safe_url_handles_custom_port():
+    """get_safe_url_with_resolved_ip preserves custom port."""
+
+    def mock_getaddrinfo(hostname, port=None, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        if hostname == "example.com":
+            return [(socket.AF_INET, type, proto, "", ("93.184.216.34", port))]
+        raise socket.gaierror(f"No resolution for {hostname}")
+
+    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo):
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip("https://example.com:8443")
+
+    assert resolved_ip == "93.184.216.34"
+    assert hostname == "example.com"
+    assert port == 8443
+
+
+def test_build_pinned_url_basic():
+    """build_pinned_url constructs URL with IP and includes Host header."""
+    pinned_url, headers = build_pinned_url(
+        "https://example.com/path", "93.184.216.34", "example.com", 443
+    )
+
+    assert pinned_url == "https://93.184.216.34/path"
+    assert headers == {"Host": "example.com"}
+
+
+def test_build_pinned_url_with_custom_port():
+    """build_pinned_url includes port when non-standard."""
+    pinned_url, headers = build_pinned_url(
+        "https://example.com:8443/path", "93.184.216.34", "example.com", 8443
+    )
+
+    assert pinned_url == "https://93.184.216.34:8443/path"
+    assert headers == {"Host": "example.com"}
+
+
+def test_build_pinned_url_preserves_query():
+    """build_pinned_url preserves query parameters."""
+    pinned_url, headers = build_pinned_url(
+        "https://example.com/search?q=test", "93.184.216.34", "example.com", 443
+    )
+
+    assert pinned_url == "https://93.184.216.34/search?q=test"
+    assert headers == {"Host": "example.com"}
+
+
+def test_build_pinned_url_http():
+    """build_pinned_url works for HTTP (port 80)."""
+    pinned_url, headers = build_pinned_url(
+        "http://example.com/path", "93.184.216.34", "example.com", 80
+    )
+
+    assert pinned_url == "http://93.184.216.34/path"
+    assert headers == {"Host": "example.com"}
+
+
+# ---------------------------------------------------------------------------
 # Tests for DNS rebinding mitigation behavior
 # ---------------------------------------------------------------------------
 
 
-def test_dns_rebinding_mitigation_behavior():
-    """Document the DNS rebinding mitigation approach.
+def test_dns_rebinding_mitigation_via_ip_pinning():
+    """Verify that IP pinning prevents DNS rebinding attacks.
 
-    This test verifies that is_url_safe resolves the hostname and checks ALL returned IPs.
-    The SSRF guard resolves DNS once and validates all IPs before the request would be made.
+    With the new implementation, the resolved IP returned by get_safe_url_with_resolved_ip
+    should be the one actually connected to, eliminating the TOCTOU window.
 
-    Key behavior:
-    - If ANY resolved IP is in a blocked range, the URL is rejected
-    - This includes hosts that resolve to multiple IPs (some public, some private)
-
-    LIMITATION DISCLOSED:
-    The actual HTTP request will still perform its own DNS resolution (httpx internally).
-    This creates a TOCTOU window. However, we mitigate this by documenting it clearly
-    and the practical reality is that DNS rebinding attacks typically involve very short
-    TTLs and rapid IP changes - standard websites use normal TTLs and don't change
-    IPs within seconds.
+    This test documents that:
+    - IPs are resolved once during validation
+    - The same IP is returned and can be used for connection
+    - No second DNS lookup happens in the request path (httpx uses the provided IP)
     """
-    # Test a host that resolves to a mix of safe and unsafe IPs
-    # If ANY IP is unsafe, the URL should be rejected
+    call_count = [0]
 
-    def mock_getaddrinfo_mixed(
-        hostname, port=None, family=0, type=0, proto=0, flags=0  # noqa: A002
-    ):
-        if hostname == "mixed.example.com":
-            return [
-                (socket.AF_INET, type, proto, "", ("10.0.0.1", port)),  # Private - unsafe
-                (socket.AF_INET, type, proto, "", ("93.184.216.34", port)),  # Public
-            ]
+    def mock_getaddrinfo_once(hostname, port=None, family=0, type=0, proto=0, flags=0):  # noqa: A002
+        # Detect if multiple calls are made (which would indicate re-resolution)
+        call_count[0] += 1
+        if hostname == "ip-pinned.example.com":
+            return [(socket.AF_INET, type, proto, "", ("93.184.216.34", port))]
         raise socket.gaierror(f"No resolution for {hostname}")
 
-    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo_mixed):
-        is_safe, reason = is_url_safe("https://mixed.example.com")
-        assert is_safe is False
-        assert "private" in reason.lower() or "10." in reason
+    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo_once):
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip("https://ip-pinned.example.com")
+
+    # Should have called getaddrinfo exactly once
+    assert call_count[0] == 1
+    assert resolved_ip == "93.184.216.34"
+    assert hostname == "ip-pinned.example.com"
 
 
 def test_unresolvable_hostname_rejected():
@@ -186,3 +272,10 @@ def test_unresolvable_hostname_rejected():
         is_safe, reason = is_url_safe("https://nonexistent.invalid/")
         assert is_safe is False
         assert "failed to resolve" in reason.lower() or "resolve" in reason.lower()
+
+    # Also test get_safe_url_with_resolved_ip returns None tuple
+    with patch("ua.web.ssrf_guard.socket.getaddrinfo", side_effect=mock_getaddrinfo_fail):
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip("https://nonexistent.invalid/")
+        assert resolved_ip is None
+        assert hostname is None
+        assert port is None

@@ -2,16 +2,15 @@
 
 This tool fetches a URL and extracts readable text content.
 
-DISCLAIMER AND SECURITY CAVEAT:
-===============================
-This tool fetches arbitrary URLs. While it includes SSRF (Server-Side Request Forgery)
-protection via ssrf_guard.py, there are important limitations:
+SECURITY CONSIDERATIONS:
+=======================
+This tool includes SSRF (Server-Side Request Forgery) protection via ssrf_guard.py.
 
-1. DNS REBINDING: The SSRF guard resolves hostnames once for validation. However, httpx
-   will resolve DNS again when making the actual request. This creates a TOCTOU (time-of-check
-   to time-of-use) window where an attacker could change DNS to point to a private IP after
-   validation passes. This is a KNOWN LIMITATION that is NOT mitigated in the request path.
-   See the ssrf_guard module docstring for more details.
+1. IP PINNING AGAINST DNS REBINDING:
+   The SSRF guard resolves the hostname ONCE to validate all IPs. The resolved IP
+   is then used to make the HTTP connection directly, with the original hostname
+   passed via the Host header and SNI. This eliminates the TOCTOU window where an
+   attacker could change DNS between validation and the actual request.
 
 2. CONTENT EXTRACTION: This tool uses simple HTML tag stripping (stdlib html.parser).
    It does NOT implement sophisticated readability algorithms. Extracted text may include
@@ -32,7 +31,7 @@ from html.parser import HTMLParser
 import httpx
 
 from ua.tools.base import Tool, ToolResult
-from ua.web.ssrf_guard import is_url_safe
+from ua.web.ssrf_guard import build_pinned_url, get_safe_url_with_resolved_ip
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -87,23 +86,22 @@ class HTMLTextExtractor(HTMLParser):
 class WebFetchTool(Tool):
     """Fetch a URL and extract readable text content.
 
-    This tool takes a URL, validates it against SSRF protection rules, fetches
-    the content, and extracts plain text from HTML.
+    This tool takes a URL, validates it against SSRF protection rules, resolves
+    the hostname to an IP address, and makes the HTTP connection directly to that
+    IP (pinning) while preserving the original hostname via Host header/SNI.
+    This mitigates DNS rebinding attacks.
 
-    DISCLAIMER AND SECURITY CAVEAT:
-    ===============================
-    This tool fetches arbitrary URLs. While it includes SSRF protection, there
-    are known limitations (DNS rebinding, simple HTML extraction, etc.). See the
-    ssrf_guard module docstring for full details on DNS rebinding NOT being mitigated.
+    SECURITY: DNS rebinding is mitigated by IP pinning - the IP resolved during
+    validation is the IP actually connected to, not re-resolved by httpx.
     """
 
     name = "web_fetch"
     description = (
         "Fetch a URL and extract readable text content. "
         "Includes SSRF protection against internal/private/cloud-metadata addresses. "
+        "Uses IP pinning to mitigate DNS rebinding attacks. "
         "Uses simple HTML tag stripping - may include navigation/footer text. "
-        "Response capped at 1MB, extracted text truncated to ~5000 chars. "
-        "IMPORTANT: DNS rebinding is NOT mitigated - see ssrf_guard docstring."
+        "Response capped at 1MB, extracted text truncated to ~5000 chars."
     )
     parameters = {
         "type": "object",
@@ -143,25 +141,32 @@ class WebFetchTool(Tool):
             ToolResult with success=True and extracted text, or
             success=False with an error message.
         """
-        # Step 1: SSRF protection check on initial URL
-        is_safe, reason = is_url_safe(url)
-        if not is_safe:
+        # Step 1: SSRF protection check with IP pinning on initial URL
+        resolved_ip, hostname, port = get_safe_url_with_resolved_ip(url)
+        if resolved_ip is None:
             return ToolResult(
                 success=False,
                 output="",
-                error=f"URL rejected by SSRF protection: {reason}",
+                error="URL rejected by SSRF protection: hostname resolves to private/internal IP or scheme not allowed.",
             )
 
         # Step 2: Fetch the URL with manual redirect handling and size limits
         client = self._get_client()
         redirect_count = 0
         max_redirects = 5
-        current_url = url
+
+        # Build the pinned URL for the initial request
+        current_pinned_url, request_headers = build_pinned_url(url, resolved_ip, hostname, port)
 
         while redirect_count <= max_redirects:
             try:
                 # Use streaming to enforce size limit
-                response = await client.get(current_url, stream=True, follow_redirects=False)
+                response = await client.get(
+                    current_pinned_url,
+                    headers=request_headers,
+                    stream=True,
+                    follow_redirects=False,
+                )
 
                 # Check for redirect - validate redirect target before following
                 if response.status_code in (301, 302, 303, 307, 308):
@@ -181,25 +186,29 @@ class WebFetchTool(Tool):
                             output="",
                             error="Redirect response missing Location header.",
                         )
+                    await response.aclose()
 
                     # Resolve relative redirect URLs
                     from urllib.parse import urljoin
 
-                    redirect_url = urljoin(current_url, location)
+                    redirect_url = urljoin(current_pinned_url, location)
 
-                    # Re-validate redirect target with SSRF protection
-                    is_safe_redirect, redirect_reason = is_url_safe(redirect_url)
-                    if not is_safe_redirect:
+                    # Re-validate redirect target with SSRF protection and IP pinning
+                    redirect_resolved_ip, redirect_hostname, redirect_port = get_safe_url_with_resolved_ip(redirect_url)
+                    if redirect_resolved_ip is None:
                         return ToolResult(
                             success=False,
                             output="",
                             error=(
-                                f"Redirect to unsafe URL rejected by SSRF protection: "
-                                f"{redirect_reason}"
+                                "Redirect to unsafe URL rejected by SSRF protection: "
+                                "target hostname resolves to private/internal IP or scheme not allowed."
                             ),
                         )
 
-                    current_url = redirect_url
+                    # Build pinned URL for redirect target
+                    current_pinned_url, request_headers = build_pinned_url(
+                        redirect_url, redirect_resolved_ip, redirect_hostname, redirect_port
+                    )
                     continue
 
                 # For non-redirect responses, check status

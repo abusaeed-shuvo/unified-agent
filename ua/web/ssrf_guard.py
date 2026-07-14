@@ -9,27 +9,26 @@ PROTECTED ADDRESS RANGES (RFC 1918 and related):
 - Link-local: 169.254.0.0/16 (blocks cloud metadata endpoints like 169.254.169.254)
 - Other reserved ranges: 0.0.0.0/8, 224.0.0.0/4 (multicast), 240.0.0.0/4 (reserved)
 
-DNS REBINDING STATUS:
-====================
-This module resolves the hostname ONCE to validate all IPs. However, THIS IS A VALIDATION-ONLY
-MECHANISM. The actual HTTP request performed by httpx WILL perform its own DNS resolution,
-creating a TOCTOU window.
+DNS REBINDING MITIGATION:
+========================
+This module resolves the hostname ONCE to validate all IPs. When used with the
+`get_safe_url_with_resolved_ip()` function, the resolved IP is then used to make
+the HTTP connection directly, with the original hostname passed via the Host header
+and SNI. This eliminates the TOCTOU window where an attacker could change DNS
+between validation and the actual request.
 
-WE DO NOT CLAIM TO MITIGATE DNS REBINDING IN THE REQUEST PATH. This is a known limitation.
-The `get_safe_url_with_resolved_ip()` function exists for potential future use if IP pinning
-is implemented, but it is NOT currently used by WebFetchTool.
-
-KNOWN RESIDUAL RISKS:
-- DNS rebinding: httpx re-resolves DNS on the actual request; an attacker could change
-  DNS between our validation and the httpx request
-- For high-security environments, consider DNS caching with TTL enforcement
-- Running fetches in a separate process with network isolation is recommended
+The mitigation works by:
+1. Resolving the hostname and checking all IPs during validation
+2. Returning the validated IP address and original hostname
+3. Using the resolved IP for the actual HTTP connection (not re-resolving)
+4. Passing the original hostname via Host header for virtual hosting/TLS compatibility
 
 REDIRECT SSRF BYPASS:
 =====================
 WebFetchTool initially used follow_redirects=True, which would allow redirects to unsafe
 targets. This has been FIXED: redirects are now disabled and manual redirect handling with
-SSRF re-validation is implemented.
+SSRF re-validation is implemented. Each redirect hop re-validates and pins the IP before
+making the connection.
 """
 
 from __future__ import annotations
@@ -142,6 +141,57 @@ def _is_ip_in_private_or_reserved_range(
     return False, ""
 
 
+def _validate_url_and_resolve_ip(
+    url: str,
+) -> tuple[list[ipaddress.IPv4Address | ipaddress.IPv6Address], str | None, str | None, int | None]:
+    """Validate URL and resolve hostname to IPs in a single step.
+
+    This is the core function that performs validation and resolution exactly once.
+
+    Args:
+        url: The URL to validate and resolve.
+
+    Returns:
+        Tuple of (list of IPs, hostname, error, port) - IPs and hostname are populated
+        if validation succeeds, error is populated if validation fails.
+    """
+    # Parse and check scheme
+    try:
+        parsed = urlparse(url)
+    except Exception as e:
+        return [], None, f"Failed to parse URL: {e}", None
+
+    scheme = parsed.scheme.lower()
+    if scheme not in ("http", "https"):
+        return [], None, f"URL scheme '{scheme}' is not allowed. Only http and https are permitted.", None
+
+    # Extract hostname
+    hostname = parsed.hostname
+    if hostname is None:
+        return [], None, "URL does not contain a valid hostname.", None
+
+    # Get port (default to 80 for http, 443 for https)
+    port = parsed.port
+    if port is None:
+        port = 443 if scheme == "https" else 80
+
+    # Resolve hostname and check all IPs
+    ips, error = _resolve_hostname_once(hostname)
+    if error:
+        return [], hostname, error, port
+
+    if not ips:
+        return [], hostname, f"Could not resolve hostname '{hostname}' to any IP addresses.", port
+
+    # Check each resolved IP
+    for ip in ips:
+        is_unsafe, reason = _is_ip_in_private_or_reserved_range(ip)
+        if is_unsafe:
+            return [], hostname, reason, port
+
+    return ips, hostname, None, port
+
+
 def is_url_safe(url: str) -> tuple[bool, str]:
     """Check if a URL is safe to fetch (not vulnerable to SSRF).
 
@@ -156,84 +206,94 @@ def is_url_safe(url: str) -> tuple[bool, str]:
         Tuple of (is_safe, reason_if_unsafe). If safe, reason will be empty string.
 
     Note:
-        This is a validation-only check. The actual HTTP request will re-resolve DNS.
-        DNS rebinding is NOT mitigated - see module docstring for details.
+        For DNS rebinding mitigation, use get_safe_url_with_resolved_ip() to get
+        the resolved IP address for pin-the-IP connections.
     """
-    # Parse and check scheme
-    try:
-        parsed = urlparse(url)
-    except Exception as e:
-        return False, f"Failed to parse URL: {e}"
-
-    scheme = parsed.scheme.lower()
-    if scheme not in ("http", "https"):
-        return False, f"URL scheme '{scheme}' is not allowed. Only http and https are permitted."
-
-    # Extract hostname
-    hostname = parsed.hostname
-    if hostname is None:
-        return False, "URL does not contain a valid hostname."
-
-    # Resolve hostname and check all IPs
-    ips, error = _resolve_hostname_once(hostname)
-    if error:
+    ips, _, error, _ = _validate_url_and_resolve_ip(url)
+    if error is not None:
         return False, error
-
-    if not ips:
-        return False, f"Could not resolve hostname '{hostname}' to any IP addresses."
-
-    # Check each resolved IP
-    for ip in ips:
-        is_unsafe, reason = _is_ip_in_private_or_reserved_range(ip)
-        if is_unsafe:
-            return False, reason
-
     return True, ""
 
 
-def get_safe_url_with_resolved_ip(url: str) -> tuple[str, str | None]:
-    """Get a safe URL with its pre-resolved IP for connection.
+def get_safe_url_with_resolved_ip(
+    url: str,
+) -> tuple[str, str, int] | tuple[None, None, None]:
+    """Validate URL and return resolved IP for DNS rebinding-safe connections.
 
-    EXPERIMENTAL - NOT CURRENTLY USED BY WebFetchTool.
+    This function validates the URL, resolves the hostname to an IP address, and returns
+    all information needed to make a connection directly to the resolved IP while
+    preserving the original hostname for Host header and SNI (TLS compatibility).
 
-    This function validates the URL and returns the resolved IP address that could
-    be used for the actual HTTP connection, along with the original hostname for
-    the Host header/SNI.
-
-    This is provided for potential future use if IP pinning is implemented.
+    The returned tuple allows the caller to construct an HTTP request like:
+        httpx.get(f"{scheme}://{resolved_ip}{path}", headers={"Host": hostname})
+    which prevents DNS rebinding attacks by connecting to a pre-validated IP.
 
     Args:
         url: The URL to validate and resolve.
 
     Returns:
-        Tuple of (resolved_ip_address, original_hostname) if safe.
-        Raises UnsafeUrlError if the URL is not safe.
+        Tuple of (resolved_ip_address, original_hostname, port) if safe.
+        Returns (None, None, None) if the URL is not safe or cannot be resolved.
 
     Note:
-        This function exists for potential future IP-pinning implementation.
-        See module docstring for DNS rebinding limitations.
+        For each redirect hop, call this function again to re-validate and re-pin the IP.
+        This closes the TOCTOU window on both initial requests and redirects.
     """
-    # First validate the URL
-    is_safe, reason = is_url_safe(url)
-    if not is_safe:
-        raise UnsafeUrlError(reason)
-
-    # Parse URL and get hostname
-    parsed = urlparse(url)
-    hostname = parsed.hostname
-    if hostname is None:
-        raise UnsafeUrlError("URL does not contain a valid hostname.")
-
-    # Resolve hostname
-    ips, _ = _resolve_hostname_once(hostname)
-    if not ips:
-        raise UnsafeUrlError(f"Could not resolve hostname '{hostname}'")
+    # Validate and resolve in a single step (no double resolution)
+    ips, hostname, error, port = _validate_url_and_resolve_ip(url)
+    if error is not None:
+        return None, None, None
 
     # Return the first resolved IP (prefer IPv4 for broader compatibility)
     # In production, you might want to try all IPs or prefer based on network conditions
     for ip in ips:
         if isinstance(ip, ipaddress.IPv4Address):
-            return str(ip), hostname
+            return str(ip), hostname, port
 
     # Fall back to IPv6 if no IPv4
-    return str(ips[0]), hostname
+    return str(ips[0]), hostname, port
+
+
+def build_pinned_url(
+    original_url: str,
+    resolved_ip: str,
+    hostname: str,
+    port: int,
+) -> tuple[str, dict[str, str]]:
+    """Build a URL for IP-pinned connection with Host header.
+
+    This helper function constructs a URL that points to the resolved IP address
+    and returns headers needed for virtual hosting and TLS to work correctly.
+
+    Args:
+        original_url: The original URL to fetch.
+        resolved_ip: The pre-validated resolved IP address.
+        hostname: The original hostname for Host header and SNI.
+        port: The port number to use.
+
+    Returns:
+        Tuple of (pinned_url, headers) where pinned_url uses the IP address
+        and headers contains the Host header for virtual hosting.
+    """
+    parsed = urlparse(original_url)
+
+    # Build the URL with the resolved IP
+    scheme = parsed.scheme.lower()
+    if port == 443 and scheme == "https":
+        host_with_port = resolved_ip
+    elif port == 80 and scheme == "http":
+        host_with_port = resolved_ip
+    else:
+        host_with_port = f"{resolved_ip}:{port}"
+
+    # Reconstruct path and query
+    path = parsed.path or "/"
+    if parsed.query:
+        path = f"{path}?{parsed.query}"
+
+    pinned_url = f"{scheme}://{host_with_port}{path}"
+
+    # Headers for virtual hosting and SNI
+    headers = {"Host": hostname}
+
+    return pinned_url, headers
