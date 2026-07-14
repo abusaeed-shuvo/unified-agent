@@ -3,14 +3,15 @@
 This tool fetches a URL and extracts readable text content.
 
 SECURITY CONSIDERATIONS:
-=======================
+========================
 This tool includes SSRF (Server-Side Request Forgery) protection via ssrf_guard.py.
 
 1. IP PINNING AGAINST DNS REBINDING:
    The SSRF guard resolves the hostname ONCE to validate all IPs. The resolved IP
-   is then used to make the HTTP connection directly, with the original hostname
-   passed via the Host header and SNI. This eliminates the TOCTOU window where an
-   attacker could change DNS between validation and the actual request.
+   is then used for the connection via a custom network backend, while the original
+   hostname is preserved in the URL for SNI and certificate verification. This
+   eliminates the TOCTOU window where an attacker could change DNS between
+   validation and the actual request.
 
 2. CONTENT EXTRACTION: This tool uses simple HTML tag stripping (stdlib html.parser).
    It does NOT implement sophisticated readability algorithms. Extracted text may include
@@ -26,12 +27,16 @@ For production use, review the ssrf_guard module's docstring for detailed risk a
 
 from __future__ import annotations
 
+import asyncio
+import socket
 from html.parser import HTMLParser
+from typing import Any
 
 import httpx
+import httpcore
 
 from ua.tools.base import Tool, ToolResult
-from ua.web.ssrf_guard import build_pinned_url, get_safe_url_with_resolved_ip
+from ua.web.ssrf_guard import get_safe_url_with_resolved_ip
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -40,6 +45,101 @@ from ua.web.ssrf_guard import build_pinned_url, get_safe_url_with_resolved_ip
 DEFAULT_TIMEOUT = 10.0  # seconds
 MAX_RESPONSE_SIZE = 1_048_576  # 1MB
 MAX_EXTRACTED_TEXT_LENGTH = 5000  # characters
+
+
+# ---------------------------------------------------------------------------
+# Custom Network Backend for IP Pinning with SNI Preservation
+# ---------------------------------------------------------------------------
+
+
+class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
+    """Custom network backend that connects to a pre-resolved IP address.
+
+    This preserves SNI and certificate verification while preventing DNS rebinding
+    attacks by connecting to a validated IP instead of re-resolving the hostname.
+    """
+
+    def __init__(self, resolved_ip: str, resolved_port: int):
+        """Initialize with the validated IP and port.
+
+        Args:
+            resolved_ip: The pre-validated IP address to connect to.
+            resolved_port: The port to connect to.
+        """
+        self._resolved_ip = resolved_ip
+        self._resolved_port = resolved_port
+
+    async def connect_tcp(
+        self,
+        host: str,
+        port: int,
+        local_addr: str | None = None,
+        socket_options: list[tuple[int, int, int, int, Any]] | None = None,
+    ) -> httpcore.AsyncByteStream:
+        """Connect to the pre-resolved IP instead of resolving the hostname.
+
+        Args:
+            host: The original hostname (used for SNI, ignored for connection target).
+            port: The original port (ignored, uses resolved_port instead).
+            local_addr: Optional local address to bind.
+            socket_options: Optional socket options.
+
+        Returns:
+            An async byte stream connected to the resolved IP.
+        """
+        # Connect to the resolved IP, not the host
+        # The host is still used for SNI via the HTTP connection's Origin
+        stream = await httpcore.AsyncSocketStream.connect(
+            (self._resolved_ip, self._resolved_port),
+            local_addr=local_addr,
+            socket_options=socket_options,
+        )
+        return stream
+
+    async def connect_unix_socket(
+        self, path: str
+    ) -> httpcore.AsyncByteStream:
+        """Not supported for IP pinning."""
+        raise httpcore.NetworkError("Unix sockets not supported in PinnedIPNetworkBackend")
+
+    async def sleep(self, seconds: float) -> None:
+        """Sleep for the given duration."""
+        await asyncio.sleep(seconds)
+
+
+def _create_pinned_client(
+    resolved_ip: str, resolved_port: int, timeout: float = DEFAULT_TIMEOUT
+) -> httpx.AsyncClient:
+    """Create an httpx client that connects to the resolved IP while preserving SNI.
+
+    Args:
+        resolved_ip: The pre-validated IP address.
+        resolved_port: The port to connect to.
+        timeout: Request timeout in seconds.
+
+    Returns:
+        An AsyncClient configured with IP-pinned transport.
+    """
+    import ssl
+
+    # Create a custom network backend that uses the pinned IP
+    network_backend = PinnedIPNetworkBackend(resolved_ip, resolved_port)
+
+    # Create SSL context for verification (default with hostname checking enabled)
+    ssl_context = ssl.create_default_context()
+
+    # Use AsyncConnectionPool as the transport (supports network_backend)
+    transport = httpcore.AsyncConnectionPool(
+        ssl_context=ssl_context,
+        keepalive_expiry=DEFAULT_TIMEOUT,
+        network_backend=network_backend,
+    )
+    client = httpx.AsyncClient(
+        transport=transport,
+        timeout=timeout,
+        follow_redirects=False,
+    )
+    return client
 
 
 # ---------------------------------------------------------------------------
@@ -88,7 +188,7 @@ class WebFetchTool(Tool):
 
     This tool takes a URL, validates it against SSRF protection rules, resolves
     the hostname to an IP address, and makes the HTTP connection directly to that
-    IP (pinning) while preserving the original hostname via Host header/SNI.
+    IP (pinning) while preserving the original hostname via SNI for TLS.
     This mitigates DNS rebinding attacks.
 
     SECURITY: DNS rebinding is mitigated by IP pinning - the IP resolved during
@@ -122,13 +222,21 @@ class WebFetchTool(Tool):
         """
         self._client: httpx.AsyncClient | None = None
 
-    def _get_client(self) -> httpx.AsyncClient:
-        """Get or create the HTTP client with configured timeout."""
+    def _get_client(self, resolved_ip: str | None = None, resolved_port: int | None = None) -> httpx.AsyncClient:
+        """Get or create the HTTP client with configured timeout and optional IP pinning.
+
+        Args:
+            resolved_ip: Optional pre-resolved IP for DNS rebinding mitigation.
+            resolved_port: The port to connect to when resolved_ip is set.
+        """
+        if resolved_ip is not None and resolved_port is not None:
+            return _create_pinned_client(resolved_ip, resolved_port)
+
         if self._client is not None:
             return self._client
 
         # Create client with timeout limit (size limit enforced separately via streaming)
-        self._client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT)
+        self._client = httpx.AsyncClient(timeout=DEFAULT_TIMEOUT, follow_redirects=False)
         return self._client
 
     async def run(self, url: str) -> ToolResult:
@@ -151,22 +259,16 @@ class WebFetchTool(Tool):
             )
 
         # Step 2: Fetch the URL with manual redirect handling and size limits
-        client = self._get_client()
+        client = self._get_client(resolved_ip, port)
         redirect_count = 0
         max_redirects = 5
-
-        # Build the pinned URL for the initial request
-        current_pinned_url, request_headers = build_pinned_url(url, resolved_ip, hostname, port)
+        html_content = None
 
         while redirect_count <= max_redirects:
             try:
                 # Use streaming to enforce size limit
-                response = await client.get(
-                    current_pinned_url,
-                    headers=request_headers,
-                    stream=True,
-                    follow_redirects=False,
-                )
+                # NOTE: We use the original URL to preserve SNI for HTTPS
+                response = await client.get(url, stream=True, follow_redirects=False)
 
                 # Check for redirect - validate redirect target before following
                 if response.status_code in (301, 302, 303, 307, 308):
@@ -191,7 +293,7 @@ class WebFetchTool(Tool):
                     # Resolve relative redirect URLs
                     from urllib.parse import urljoin
 
-                    redirect_url = urljoin(current_pinned_url, location)
+                    redirect_url = urljoin(url, location)
 
                     # Re-validate redirect target with SSRF protection and IP pinning
                     redirect_resolved_ip, redirect_hostname, redirect_port = get_safe_url_with_resolved_ip(redirect_url)
@@ -205,26 +307,17 @@ class WebFetchTool(Tool):
                             ),
                         )
 
-                    # Build pinned URL for redirect target
-                    current_pinned_url, request_headers = build_pinned_url(
-                        redirect_url, redirect_resolved_ip, redirect_hostname, redirect_port
-                    )
+                    # Create a new client with the redirect's pinned IP
+                    client = self._get_client(redirect_resolved_ip, redirect_port)
+                    url = redirect_url  # Continue loop with redirect URL (SNI preserved)
                     continue
 
                 # For non-redirect responses, check status
                 response.raise_for_status()
 
                 # Step 3: Stream response with size limit enforcement
-                try:
-                    html_content = await self._stream_response_with_size_limit(response)
-                except ValueError as e:
-                    return ToolResult(
-                        success=False,
-                        output="",
-                        error=str(e),
-                    )
-                finally:
-                    await response.aclose()
+                html_content = await self._stream_response_with_size_limit(response)
+                await response.aclose()
 
                 break
 

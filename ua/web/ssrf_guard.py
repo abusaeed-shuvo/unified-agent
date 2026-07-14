@@ -13,15 +13,15 @@ DNS REBINDING MITIGATION:
 ========================
 This module resolves the hostname ONCE to validate all IPs. When used with the
 `get_safe_url_with_resolved_ip()` function, the resolved IP is then used to make
-the HTTP connection directly, with the original hostname passed via the Host header
-and SNI. This eliminates the TOCTOU window where an attacker could change DNS
-between validation and the actual request.
+the HTTP connection directly via a custom network backend, while preserving the
+original hostname for SNI and certificate verification. This eliminates the TOCTOU
+window where an attacker could change DNS between validation and the actual request.
 
 The mitigation works by:
 1. Resolving the hostname and checking all IPs during validation
 2. Returning the validated IP address and original hostname
-3. Using the resolved IP for the actual HTTP connection (not re-resolving)
-4. Passing the original hostname via Host header for virtual hosting/TLS compatibility
+3. Using a custom network backend that connects to the resolved IP
+4. Preserving the original hostname in the request Origin for SNI and TLS cert verification
 
 REDIRECT SSRF BYPASS:
 =====================
@@ -222,11 +222,10 @@ def get_safe_url_with_resolved_ip(
 
     This function validates the URL, resolves the hostname to an IP address, and returns
     all information needed to make a connection directly to the resolved IP while
-    preserving the original hostname for Host header and SNI (TLS compatibility).
+    preserving the original hostname for SNI and certificate verification.
 
-    The returned tuple allows the caller to construct an HTTP request like:
-        httpx.get(f"{scheme}://{resolved_ip}{path}", headers={"Host": hostname})
-    which prevents DNS rebinding attacks by connecting to a pre-validated IP.
+    The returned tuple allows the caller to construct an HTTP request using the original
+    hostname in the URL (for SNI/cert verification) while connecting to a pre-validated IP.
 
     Args:
         url: The URL to validate and resolve.
@@ -259,41 +258,23 @@ def build_pinned_url(
     resolved_ip: str,
     hostname: str,
     port: int,
-) -> tuple[str, dict[str, str]]:
-    """Build a URL for IP-pinned connection with Host header.
+) -> tuple[str, str, int]:
+    """Return original URL info for IP pinning (does NOT modify the URL).
 
-    This helper function constructs a URL that points to the resolved IP address
-    and returns headers needed for virtual hosting and TLS to work correctly.
+    This function returns the original URL and hostname for making requests that
+    connect to the pre-validated IP via a custom network backend, while keeping
+    the original hostname in the URL for SNI and certificate verification.
 
     Args:
-        original_url: The original URL to fetch.
+        original_url: The original URL to fetch (used as-is for the request).
         resolved_ip: The pre-validated resolved IP address.
-        hostname: The original hostname for Host header and SNI.
+        hostname: The original hostname for SNI.
         port: The port number to use.
 
     Returns:
-        Tuple of (pinned_url, headers) where pinned_url uses the IP address
-        and headers contains the Host header for virtual hosting.
+        Tuple of (original_url, hostname, resolved_ip) - the caller should use
+        the original URL for the httpx request and pass resolved_ip to a custom
+        transport for IP-pinned connection.
     """
-    parsed = urlparse(original_url)
-
-    # Build the URL with the resolved IP
-    scheme = parsed.scheme.lower()
-    if port == 443 and scheme == "https":
-        host_with_port = resolved_ip
-    elif port == 80 and scheme == "http":
-        host_with_port = resolved_ip
-    else:
-        host_with_port = f"{resolved_ip}:{port}"
-
-    # Reconstruct path and query
-    path = parsed.path or "/"
-    if parsed.query:
-        path = f"{path}?{parsed.query}"
-
-    pinned_url = f"{scheme}://{host_with_port}{path}"
-
-    # Headers for virtual hosting and SNI
-    headers = {"Host": hostname}
-
-    return pinned_url, headers
+    # Return the original URL to preserve SNI, along with mapping info
+    return original_url, hostname, resolved_ip

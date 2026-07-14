@@ -5,7 +5,7 @@ from __future__ import annotations
 import socket
 from unittest.mock import patch
 
-from ua.web.ssrf_guard import build_pinned_url, get_safe_url_with_resolved_ip, is_url_safe
+from ua.web.ssrf_guard import get_safe_url_with_resolved_ip, is_url_safe
 
 # ---------------------------------------------------------------------------
 # Tests for blocked URLs
@@ -186,52 +186,7 @@ def test_get_safe_url_handles_custom_port():
     assert port == 8443
 
 
-def test_build_pinned_url_basic():
-    """build_pinned_url constructs URL with IP and includes Host header."""
-    pinned_url, headers = build_pinned_url(
-        "https://example.com/path", "93.184.216.34", "example.com", 443
-    )
-
-    assert pinned_url == "https://93.184.216.34/path"
-    assert headers == {"Host": "example.com"}
-
-
-def test_build_pinned_url_with_custom_port():
-    """build_pinned_url includes port when non-standard."""
-    pinned_url, headers = build_pinned_url(
-        "https://example.com:8443/path", "93.184.216.34", "example.com", 8443
-    )
-
-    assert pinned_url == "https://93.184.216.34:8443/path"
-    assert headers == {"Host": "example.com"}
-
-
-def test_build_pinned_url_preserves_query():
-    """build_pinned_url preserves query parameters."""
-    pinned_url, headers = build_pinned_url(
-        "https://example.com/search?q=test", "93.184.216.34", "example.com", 443
-    )
-
-    assert pinned_url == "https://93.184.216.34/search?q=test"
-    assert headers == {"Host": "example.com"}
-
-
-def test_build_pinned_url_http():
-    """build_pinned_url works for HTTP (port 80)."""
-    pinned_url, headers = build_pinned_url(
-        "http://example.com/path", "93.184.216.34", "example.com", 80
-    )
-
-    assert pinned_url == "http://93.184.216.34/path"
-    assert headers == {"Host": "example.com"}
-
-
-# ---------------------------------------------------------------------------
-# Tests for DNS rebinding mitigation behavior
-# ---------------------------------------------------------------------------
-
-
-def test_dns_rebinding_mitigation_via_ip_pinning():
+def test_dns_rebinding_mitigation_via_single_resolution():
     """Verify that IP pinning prevents DNS rebinding attacks.
 
     With the new implementation, the resolved IP returned by get_safe_url_with_resolved_ip
