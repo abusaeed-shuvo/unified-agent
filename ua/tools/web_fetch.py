@@ -29,11 +29,17 @@ from __future__ import annotations
 
 import asyncio
 import socket
+from contextlib import contextmanager
 from html.parser import HTMLParser
 from typing import Any
 
 import httpx
 import httpcore
+import anyio
+import ssl
+
+from httpcore._exceptions import map_exceptions
+from httpcore._utils import is_socket_readable
 
 from ua.tools.base import Tool, ToolResult
 from ua.web.ssrf_guard import get_safe_url_with_resolved_ip
@@ -52,11 +58,120 @@ MAX_EXTRACTED_TEXT_LENGTH = 5000  # characters
 # ---------------------------------------------------------------------------
 
 
+class _AnyIOStream(httpcore.AsyncNetworkStream):
+    """Wrap an anyio ByteStream to match httpcore.AsyncNetworkStream interface.
+
+    This is the same implementation as httpcore._backends.anyio.AnyIOStream.
+    """
+
+    def __init__(self, stream: anyio.abc.ByteStream) -> None:
+        self._stream = stream
+
+    async def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        """Receive data from stream."""
+        exc_map = {
+            TimeoutError: httpcore.ReadTimeout,
+            anyio.BrokenResourceError: httpcore.ReadError,
+            anyio.ClosedResourceError: httpcore.ReadError,
+            anyio.EndOfStream: httpcore.ReadError,
+        }
+        with map_exceptions(exc_map):
+            with anyio.fail_after(timeout):
+                try:
+                    return await self._stream.receive(max_bytes=max_bytes)
+                except anyio.EndOfStream:
+                    return b""
+
+    async def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        """Send data to stream."""
+        if not buffer:
+            return
+        exc_map = {
+            TimeoutError: httpcore.WriteTimeout,
+            anyio.BrokenResourceError: httpcore.WriteError,
+            anyio.ClosedResourceError: httpcore.WriteError,
+        }
+        with map_exceptions(exc_map):
+            with anyio.fail_after(timeout):
+                await self._stream.send(buffer)
+
+    async def aclose(self) -> None:
+        """Close the stream."""
+        await self._stream.aclose()
+
+    async def start_tls(
+        self,
+        ssl_context: ssl.SSLContext,
+        server_hostname: str | None = None,
+        timeout: float | None = None,
+    ) -> httpcore.AsyncNetworkStream:
+        """Upgrade the connection to TLS.
+
+        Args:
+            ssl_context: The SSL context to use for TLS.
+            server_hostname: The hostname for SNI (from the original request).
+            timeout: Optional timeout for the TLS handshake.
+
+        Returns:
+            A new AnyIOStream wrapping the TLS stream.
+        """
+        exc_map = {
+            TimeoutError: httpcore.ConnectTimeout,
+            anyio.BrokenResourceError: httpcore.ConnectError,
+            anyio.EndOfStream: httpcore.ConnectError,
+            ssl.SSLError: httpcore.ConnectError,
+        }
+        with map_exceptions(exc_map):
+            try:
+                with anyio.fail_after(timeout):
+                    ssl_stream = await anyio.streams.tls.TLSStream.wrap(
+                        self._stream,
+                        ssl_context=ssl_context,
+                        hostname=server_hostname,
+                        standard_compatible=False,
+                        server_side=False,
+                    )
+            except Exception as exc:
+                await self.aclose()
+                raise exc
+        return _AnyIOStream(ssl_stream)
+
+    def get_extra_info(self, info: str) -> Any:
+        """Get extra connection information."""
+        if info == "ssl_object":
+            return self._stream.extra(anyio.streams.tls.TLSAttribute.ssl_object, None)
+        if info == "client_addr":
+            return self._stream.extra(anyio.abc.SocketAttribute.local_address, None)
+        if info == "server_addr":
+            return self._stream.extra(anyio.abc.SocketAttribute.remote_address, None)
+        if info == "socket":
+            return self._stream.extra(anyio.abc.SocketAttribute.raw_socket, None)
+        if info == "is_readable":
+            sock = self._stream.extra(anyio.abc.SocketAttribute.raw_socket, None)
+            return sock is not None and self._sock_has_data(sock)
+        return None
+
+    def _sock_has_data(self, sock: socket.socket) -> bool:
+        """Check if socket has data available (non-blocking check)."""
+        try:
+            sock.setblocking(False)
+            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
+            sock.setblocking(True)
+            return len(data) > 0
+        except BlockingIOError:
+            return False
+        except OSError:
+            return False
+
+
 class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
     """Custom network backend that connects to a pre-resolved IP address.
 
     This preserves SNI and certificate verification while preventing DNS rebinding
     attacks by connecting to a validated IP instead of re-resolving the hostname.
+
+    The httpcore connection layer calls start_tls with server_hostname from the
+    original request Origin, which is used for SNI during TLS handshake.
     """
 
     def __init__(self, resolved_ip: str, resolved_port: int):
@@ -73,44 +188,65 @@ class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):
         self,
         host: str,
         port: int,
-        local_addr: str | None = None,
-        socket_options: list[tuple[int, int, int, int, Any]] | None = None,
-    ) -> httpcore.AsyncByteStream:
+        timeout: float | None = None,
+        local_address: str | None = None,
+        socket_options: list[tuple] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
         """Connect to the pre-resolved IP instead of resolving the hostname.
 
         Args:
-            host: The original hostname (used for SNI, ignored for connection target).
+            host: The original hostname (will be used for SNI via start_tls).
             port: The original port (ignored, uses resolved_port instead).
-            local_addr: Optional local address to bind.
+            timeout: Optional connection timeout.
+            local_address: Optional local address to bind.
             socket_options: Optional socket options.
 
         Returns:
-            An async byte stream connected to the resolved IP.
+            An async network stream connected to the resolved IP.
         """
-        # Connect to the resolved IP, not the host
-        # The host is still used for SNI via the HTTP connection's Origin
-        stream = await httpcore.AsyncSocketStream.connect(
-            (self._resolved_ip, self._resolved_port),
-            local_addr=local_addr,
-            socket_options=socket_options,
-        )
-        return stream
+        if socket_options is None:
+            socket_options = []
+
+        exc_map = {
+            TimeoutError: httpcore.ConnectTimeout,
+            OSError: httpcore.ConnectError,
+            anyio.BrokenResourceError: httpcore.ConnectError,
+        }
+        with map_exceptions(exc_map):
+            with anyio.fail_after(timeout):
+                stream: anyio.abc.ByteStream = await anyio.connect_tcp(
+                    remote_host=self._resolved_ip,
+                    remote_port=self._resolved_port,
+                    local_host=local_address,
+                )
+                # Apply socket options if any
+                for option in socket_options:
+                    stream._raw_socket.setsockopt(*option)  # type: ignore[attr-defined]
+
+        return _AnyIOStream(stream)
 
     async def connect_unix_socket(
-        self, path: str
-    ) -> httpcore.AsyncByteStream:
+        self,
+        path: str,
+        timeout: float | None = None,
+        socket_options: list[tuple] | None = None,
+    ) -> httpcore.AsyncNetworkStream:
         """Not supported for IP pinning."""
         raise httpcore.NetworkError("Unix sockets not supported in PinnedIPNetworkBackend")
 
     async def sleep(self, seconds: float) -> None:
         """Sleep for the given duration."""
-        await asyncio.sleep(seconds)
+        await anyio.sleep(seconds)
 
 
 def _create_pinned_client(
     resolved_ip: str, resolved_port: int, timeout: float = DEFAULT_TIMEOUT
 ) -> httpx.AsyncClient:
     """Create an httpx client that connects to the resolved IP while preserving SNI.
+
+    This creates a custom httpx transport that uses a custom network backend
+    to pin the connection to the resolved IP while preserving the hostname
+    in the request for SNI.
 
     Args:
         resolved_ip: The pre-validated IP address.
@@ -120,20 +256,20 @@ def _create_pinned_client(
     Returns:
         An AsyncClient configured with IP-pinned transport.
     """
-    import ssl
-
     # Create a custom network backend that uses the pinned IP
     network_backend = PinnedIPNetworkBackend(resolved_ip, resolved_port)
 
-    # Create SSL context for verification (default with hostname checking enabled)
-    ssl_context = ssl.create_default_context()
+    # Create an httpx transport (will create default pool internally)
+    # We then replace the internal pool with one using our custom network backend
+    transport = httpx.AsyncHTTPTransport()
 
-    # Use AsyncConnectionPool as the transport (supports network_backend)
-    transport = httpcore.AsyncConnectionPool(
-        ssl_context=ssl_context,
-        keepalive_expiry=DEFAULT_TIMEOUT,
+    # Replace the pool with one using our network backend
+    # The pool's network_backend controls the actual TCP connection
+    transport._pool = httpcore.AsyncConnectionPool(
+        ssl_context=httpcore.default_ssl_context(),
         network_backend=network_backend,
     )
+
     client = httpx.AsyncClient(
         transport=transport,
         timeout=timeout,
@@ -266,9 +402,8 @@ class WebFetchTool(Tool):
 
         while redirect_count <= max_redirects:
             try:
-                # Use streaming to enforce size limit
                 # NOTE: We use the original URL to preserve SNI for HTTPS
-                response = await client.get(url, stream=True, follow_redirects=False)
+                response = await client.get(url, follow_redirects=False)
 
                 # Check for redirect - validate redirect target before following
                 if response.status_code in (301, 302, 303, 307, 308):
@@ -388,13 +523,14 @@ class WebFetchTool(Tool):
         Raises:
             ValueError: If response exceeds MAX_RESPONSE_SIZE.
         """
-        content = bytearray()
-        async for chunk in response.aiter_bytes():
-            content.extend(chunk)
-            if len(content) > MAX_RESPONSE_SIZE:
-                raise ValueError(
-                    f"Response exceeded maximum size of {MAX_RESPONSE_SIZE} bytes. "
-                    f"Aborting to prevent memory exhaustion."
-                )
+        # httpx Response has .text as a string property
+        text = response.text
 
-        return content.decode("utf-8", errors="replace")
+        # Check size against limit (text encoded to bytes)
+        if len(text.encode("utf-8")) > MAX_RESPONSE_SIZE:
+            raise ValueError(
+                f"Response exceeded maximum size of {MAX_RESPONSE_SIZE} bytes. "
+                f"Aborting to prevent memory exhaustion."
+            )
+
+        return text
