@@ -1671,69 +1671,7 @@ class SandboxWriteFileTool(Tool):
 
 ---
 
-### Batch 37 — SSRF-Guarded Web Fetch Tool
-
-**Objective:** Implement `ua/web/ssrf_guard.py` for URL safety validation and `ua/tools/web_fetch.py` for fetching URLs with SSRF protection, DNS rebinding mitigation, and HTML text extraction.
-
-**Why this batch exists:** Web fetching is essential for research but introduces SSRF attack vectors. IP pinning prevents DNS rebinding while preserving SNI for HTTPS certificate validation.
-
-**Files to create:**
-- `ua/web/ssrf_guard.py`
-- `ua/tools/web_fetch.py`
-
-**Public APIs to implement:**
-```python
-# ssrf_guard.py
-def is_url_safe(url: str) -> tuple[bool, str]: ...
-def get_safe_url_with_resolved_ip(url: str) -> tuple[str, str, int] | tuple[None, None, None]: ...
-
-# web_fetch.py
-class WebFetchTool(Tool):
-    name = "web_fetch"
-    description = "Fetch a URL and extract readable text content with SSRF protection."
-    parameters = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
-
-    def __init__(self) -> None: ...
-    async def run(self, url: str) -> ToolResult: ...
-```
-
-**Internal implementation notes:**
-- Blocks private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, link-local).
-- Uses custom `PinnedIPNetworkBackend` to connect to validated IP while preserving hostname in URL for SNI.
-- Size limit of 1MB enforced via streaming; extracted text truncated to ~5000 characters.
-- Manual redirect handling with SSRF re-validation on each redirect target.
-- Uses stdlib `html.parser.HTMLParser` for simple tag stripping.
-
-**Acceptance criteria:**
-- URLs resolving to private/internal IPs are rejected without HTTP request.
-- Cloud metadata endpoint (169.254.169.254) is blocked.
-- DNS rebinding is mitigated (IP pinned, hostname preserved for SNI).
-- Redirects to unsafe URLs are rejected.
-- Response size over 1MB triggers error.
-- HTML is extracted and whitespace collapsed.
-
-**Manual testing steps:**
-1. Run `uv run pytest tests/test_web/test_ssrf_guard.py tests/test_tools/test_web_fetch.py -v` to verify SSRF protection and fetching.
-
-**Suggested pytest tests:**
-- `tests/test_web/test_ssrf_guard.py` — all URL validation tests (blocked/allowed IPs)
-- `tests/test_tools/test_web_fetch.py::test_fetch_rejects_unsafe_url_before_making_request`
-- `tests/test_tools/test_web_fetch.py::test_fetch_handles_connection_error_gracefully`
-- `tests/test_tools/test_web_fetch.py::test_fetch_enforces_size_cap`
-- `tests/test_tools/test_web_fetch.py::test_dns_rebinding_mitigation_via_ip_pinning`
-- `tests/test_tools/test_web_fetch.py::test_real_https_fetch_with_ip_pinning`
-
-**Suggested Git commit message:** `web: add SSRF-protected web fetch tool with DNS rebinding mitigation`
-
-**Dependencies on previous batches:** Batch 15 (Tool interface), Batch 03 (logging).
-
-**Common mistakes to avoid:**
-- Don't use `follow_redirects=True` without SSRF validation on redirect targets.
-- Don't connect to hostnames directly without IP pinning.
-
----
-
-### Batch 38 — Web Search Tool with Pluggable Backend
+### Batch 37 — Web Search Tool with Pluggable Backend
 
 **Objective:** Implement `ua/web/search_backend.py` abstract interface with DuckDuckGo HTML scraper implementation, and `ua/tools/web_search.py` tool exposing web search with pluggable backend architecture.
 
@@ -1800,6 +1738,67 @@ class WebSearchTool(Tool):
 **Common mistakes to avoid:**
 - Don't fail on empty results — return success=True with ambiguity acknowledgment.
 - Don't forget to document the scraping/ToS caveats in docstrings.
+
+---
+
+### Batch 38 — SSRF-Guarded Web Fetch Tool
+
+**Objective:** Implement `ua/web/ssrf_guard.py` for URL safety validation and `ua/tools/web_fetch.py` for fetching URLs with SSRF protection, DNS rebinding mitigation, and HTML text extraction.
+
+**Why this batch exists:** Web fetching is essential for research but introduces SSRF attack vectors. IP pinning prevents DNS rebinding while preserving SNI for HTTPS certificate validation.
+
+**Files to create:**
+- `ua/web/ssrf_guard.py`
+- `ua/tools/web_fetch.py`
+
+**Public APIs to implement:**
+```python
+# ssrf_guard.py
+def is_url_safe(url: str) -> tuple[bool, str]: ...
+def get_safe_url_with_resolved_ip(url: str) -> tuple[str, str, int] | tuple[None, None, None]: ...
+
+# web_fetch.py
+class WebFetchTool(Tool):
+    name = "web_fetch"
+    description = "Fetch a URL and extract readable text content with SSRF protection."
+    parameters = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+
+    def __init__(self) -> None: ...
+    async def run(self, url: str) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- Blocks private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, link-local).
+- Uses custom `PinnedIPNetworkBackend` to connect to validated IP while preserving hostname in URL for SNI.
+- Size limit of 1MB enforced via streaming; extracted text truncated to ~5000 characters.
+- Manual redirect handling with SSRF re-validation on each redirect target.
+- Uses stdlib `html.parser.HTMLParser` for simple tag stripping.
+
+**Acceptance criteria:**
+- URLs resolving to private/internal IPs are rejected without HTTP request.
+- Cloud metadata endpoint (169.254.169.254) is blocked.
+- DNS rebinding is mitigated (IP pinned, hostname preserved for SNI).
+- Redirects to unsafe URLs are rejected.
+- Response size over 1MB triggers error.
+- HTML is extracted and whitespace collapsed.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_web/test_ssrf_guard.py tests/test_tools/test_web_fetch.py -v` to verify SSRF protection and fetching.
+
+**Suggested pytest tests:**
+- `tests/test_web/test_ssrf_guard.py` — all URL validation tests (blocked/allowed IPs)
+- `tests/test_tools/test_web_fetch.py::test_fetch_rejects_unsafe_url_before_making_request`
+- `tests/test_tools/test_web_fetch.py::test_fetch_handles_connection_error_gracefully`
+- `tests/test_tools/test_web_fetch.py::test_fetch_enforces_size_cap`
+- `tests/test_tools/test_web_fetch.py::test_dns_rebinding_mitigation_via_ip_pinning`
+- `tests/test_tools/test_web_fetch.py::test_real_https_fetch_with_ip_pinning`
+
+**Suggested Git commit message:** `web: add SSRF-protected web fetch tool with DNS rebinding mitigation`
+
+**Dependencies on previous batches:** Batch 15 (Tool interface), Batch 03 (logging).
+
+**Common mistakes to avoid:**
+- Don't use `follow_redirects=True` without SSRF validation on redirect targets.
 
 ---
 
