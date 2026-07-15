@@ -34,6 +34,7 @@ from ua.models.base import LLMResponse, ToolCall
 from ua.models.manager import ModelManager
 from ua.personality.loader import PersonalityLoader
 from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.registry import SandboxBackendRegistry
 from ua.tools.registry import ToolRegistry
 from ua.web.search_backend import SearchBackend, SearchResult
 
@@ -139,12 +140,19 @@ async def main() -> None:
     tool_registry = ToolRegistry()
     tool_registry.discover()  # Discover built-in tools including web_fetch and web_search
 
-    # Create sandbox tools with mocked manager
+    # Create sandbox backend registry with mocked manager
+    backend_registry = SandboxBackendRegistry(
+        backends={"ssh": mock_sandbox},
+        memory=memory_manager,
+        settings=settings,
+    )
+
+    # Create sandbox tools with backend_registry
     from ua.tools.sandbox_execute import SandboxExecuteTool
     from ua.tools.sandbox_write_file import SandboxWriteFileTool
 
-    sandbox_write_tool = SandboxWriteFileTool(sandbox_manager=mock_sandbox)
-    sandbox_execute_tool = SandboxExecuteTool(sandbox_manager=mock_sandbox)
+    sandbox_write_tool = SandboxWriteFileTool(backend_registry=backend_registry)
+    sandbox_execute_tool = SandboxExecuteTool(backend_registry=backend_registry)
 
     tool_registry.register_instance(sandbox_write_tool)
     tool_registry.register_instance(sandbox_execute_tool)

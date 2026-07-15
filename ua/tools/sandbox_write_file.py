@@ -6,7 +6,9 @@ Do not expose this tool to an agent with real autonomy against a real host until
 that protection is added.
 """
 
-from ua.sandbox.base import SandboxManager
+from __future__ import annotations
+
+from ua.sandbox.registry import SandboxBackendRegistry, SandboxUnavailableError
 from ua.tools.base import Tool, ToolResult
 
 
@@ -48,19 +50,25 @@ class SandboxWriteFileTool(Tool):
         },
         "required": ["project_id", "relative_path", "content"],
     }
+    requires_user_context = True
+    """This tool requires user_id for backend resolution via SandboxBackendRegistry."""
 
-    def __init__(self, sandbox_manager: SandboxManager) -> None:
+    def __init__(self, backend_registry: SandboxBackendRegistry) -> None:
         """Initialize the sandbox write file tool.
 
         Args:
-            sandbox_manager: A SandboxManager instance for remote operations.
-                           This is a required constructor argument and the tool
-                           cannot be auto-discovered.
+            backend_registry: A SandboxBackendRegistry instance for backend resolution.
+                             This is a required constructor argument and the tool
+                             cannot be auto-discovered.
         """
-        self._sandbox_manager = sandbox_manager
+        self._backend_registry = backend_registry
 
     async def run(
-        self, project_id: str, relative_path: str, content: str
+        self,
+        project_id: str,
+        relative_path: str,
+        content: str,
+        _user_id: str | None = None,
     ) -> ToolResult:
         """Write a file to the remote sandbox.
 
@@ -68,13 +76,21 @@ class SandboxWriteFileTool(Tool):
             project_id: The project identifier.
             relative_path: Path relative to the project directory.
             content: The file content to write.
+            _user_id: Internal parameter for trusted user_id (injected by registry).
 
         Returns:
             ToolResult with success=True if the file was written,
             or success=False with an error message.
         """
+        # Resolve the appropriate backend manager for this user
+        # Fail gracefully if no backend is available
         try:
-            await self._sandbox_manager.write_file(
+            sandbox_manager = await self._backend_registry.resolve(_user_id or "default")
+        except SandboxUnavailableError as e:
+            return ToolResult(success=False, output="", error=f"Sandbox unavailable: {e}")
+
+        try:
+            await sandbox_manager.write_file(
                 project_id, relative_path, content
             )
             return ToolResult(

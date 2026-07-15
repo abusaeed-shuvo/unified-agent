@@ -7,7 +7,6 @@ from collections.abc import Awaitable, Callable
 from ua.config.settings import get_settings
 from ua.conversation.context_builder import ContextBuilder
 from ua.conversation.manager import ConversationManager
-from ua.core.agent import UnifiedAgent
 from ua.database.engine import get_session_factory
 from ua.memory.knowledge import KnowledgeMemory
 from ua.memory.long_term import LongTermMemory
@@ -15,7 +14,10 @@ from ua.memory.manager import MemoryManager
 from ua.memory.short_term import ShortTermMemory
 from ua.models.manager import ModelManager
 from ua.personality.loader import PersonalityLoader
+from ua.sandbox.docker_manager import DockerSandboxManager
 from ua.sandbox.manager import SSHSandboxManager
+from ua.core.agent import UnifiedAgent
+from ua.sandbox.registry import SandboxBackendRegistry
 from ua.tools.registry import ToolRegistry
 
 
@@ -31,13 +33,13 @@ def build_default_agent(
     - Real ContextBuilder (with a real PersonalityLoader)
     - Real ModelManager (which internally picks the adapter per
       settings.llm_provider — including "fake" for testing/dev)
-    - ToolRegistry with sandbox tools explicitly registered
+    - ToolRegistry with sandbox tools explicitly registered via SandboxBackendRegistry
 
     Args:
         confirmation_callback: Optional async callback for confirming risky
-                              sandbox commands. If provided (e.g., from CLI),
-                              risky commands will prompt for confirmation. If None,
-                              risky commands are automatically rejected.
+                               sandbox commands. If provided (e.g., from CLI),
+                               risky commands will prompt for confirmation. If None,
+                               risky commands are automatically rejected.
 
     Returns:
         A fully-wired UnifiedAgent ready for chat() calls.
@@ -72,6 +74,18 @@ def build_default_agent(
     # --- Model manager ---
     model_manager = ModelManager(settings=settings)
 
+    # --- Sandbox backend registry ---
+    # Build both SSH and Docker sandbox managers
+    ssh_manager = SSHSandboxManager(settings)
+    docker_manager = DockerSandboxManager(settings)
+
+    # Create the registry with both backends
+    backend_registry = SandboxBackendRegistry(
+        backends={"ssh": ssh_manager, "docker": docker_manager},
+        memory=memory_manager,
+        settings=settings,
+    )
+
     # --- Tool registry ---
     tool_registry = ToolRegistry()
 
@@ -81,13 +95,12 @@ def build_default_agent(
     from ua.tools.sandbox_execute import SandboxExecuteTool
     from ua.tools.sandbox_write_file import SandboxWriteFileTool
 
-    sandbox_manager = SSHSandboxManager(settings)
     tool_registry.register_instance(
-        SandboxWriteFileTool(sandbox_manager=sandbox_manager)
+        SandboxWriteFileTool(backend_registry=backend_registry)
     )
     tool_registry.register_instance(
         SandboxExecuteTool(
-            sandbox_manager=sandbox_manager,
+            backend_registry=backend_registry,
             confirmation_callback=confirmation_callback,
         )
     )

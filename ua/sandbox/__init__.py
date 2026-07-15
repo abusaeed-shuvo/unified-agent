@@ -8,5 +8,6 @@ per-project working directories.
 from ua.sandbox.base import SandboxManager
 from ua.sandbox.docker_manager import DockerSandboxManager
 from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.registry import SandboxBackendRegistry, SandboxUnavailableError
 
-__all__ = ["SandboxManager", "SSHSandboxManager", "DockerSandboxManager"]
+__all__ = ["SandboxManager", "SSHSandboxManager", "DockerSandboxManager", "SandboxBackendRegistry", "SandboxUnavailableError"]

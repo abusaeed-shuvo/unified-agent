@@ -4,17 +4,37 @@ from unittest.mock import AsyncMock, MagicMock
 
 import pytest
 
-from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.base import SandboxManager
+from ua.sandbox.registry import SandboxBackendRegistry
 from ua.tools.sandbox_write_file import SandboxWriteFileTool
+
+
+def _make_mock_registry_and_backend(available: bool = True) -> tuple[SandboxBackendRegistry, MagicMock]:
+    """Create a mock backend and registry for testing."""
+    mock_mgr = MagicMock(spec=SandboxManager)
+    mock_mgr.write_file = AsyncMock()
+    mock_mgr.is_available = AsyncMock(return_value=available)
+    mock_mgr.backend_name = "ssh"
+
+    mock_memory = MagicMock()
+    mock_memory.get_fact = AsyncMock(return_value=None)
+
+    from ua.config.settings import Settings
+    settings = Settings()
+
+    registry = SandboxBackendRegistry(
+        backends={"ssh": mock_mgr},
+        memory=mock_memory,
+        settings=settings,
+    )
+    return registry, mock_mgr
 
 
 @pytest.mark.asyncio
 async def test_write_file_tool_success():
     """Test successful file write via the tool."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
-    mock_mgr.write_file = AsyncMock()
-
-    tool = SandboxWriteFileTool(sandbox_manager=mock_mgr)
+    registry, mock_mgr = _make_mock_registry_and_backend()
+    tool = SandboxWriteFileTool(backend_registry=registry)
     result = await tool.run(
         project_id="test-project",
         relative_path="test.txt",
@@ -31,12 +51,25 @@ async def test_write_file_tool_success():
 @pytest.mark.asyncio
 async def test_write_file_tool_fails_closed_when_unconfigured():
     """Test that tool fails closed when sandbox_host is None."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.write_file = AsyncMock(
         side_effect=Exception("Sandbox host not configured")
     )
+    mock_mgr.is_available = AsyncMock(return_value=True)
 
-    tool = SandboxWriteFileTool(sandbox_manager=mock_mgr)
+    mock_memory = MagicMock()
+    mock_memory.get_fact = AsyncMock(return_value=None)
+
+    from ua.config.settings import Settings
+    settings = Settings()
+
+    registry = SandboxBackendRegistry(
+        backends={"ssh": mock_mgr},
+        memory=mock_memory,
+        settings=settings,
+    )
+
+    tool = SandboxWriteFileTool(backend_registry=registry)
     result = await tool.run(
         project_id="test-project", relative_path="test.txt", content="Hello"
     )

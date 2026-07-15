@@ -200,7 +200,7 @@ class UnifiedAgent:
                 )
                 # DEBUG-only: full tool call arguments (may be sensitive).
                 self._logger.debug(f"tool '{tc.name}' arguments: {tc.arguments}")
-                tool_result = await self._execute_tool_safely(tc)
+                tool_result = await self._execute_tool_safely(tc, user_id)
                 # DEBUG-only: full tool result content (may be sensitive).
                 self._logger.debug(f"tool '{tc.name}' result: {tool_result}")
                 messages.append(
@@ -233,17 +233,18 @@ class UnifiedAgent:
         # Step 7: Return the final text
         return final_text
 
-    async def _execute_tool_safely(self, tc: ToolCall) -> str:
+    async def _execute_tool_safely(self, tc: ToolCall, user_id: str) -> str:
         """Execute a single tool call, catching ToolNotFoundError.
 
         Args:
             tc: The ToolCall to execute.
+            user_id: The trusted user identifier to pass to tools that need it.
 
         Returns:
             A human-readable string representation of the tool result.
         """
         try:
-            result = await self._tool_registry.execute(tc.name, **tc.arguments)
+            result = await self._tool_registry.execute(tc.name, user_id=user_id, **tc.arguments)
             # Use output on success, error message on failure
             if result.success:
                 return result.output

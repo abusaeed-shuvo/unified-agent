@@ -25,6 +25,13 @@ class Tool(ABC):
     description: ClassVar[str]
     parameters: ClassVar[dict]
     enabled: ClassVar[bool] = True
+    requires_user_context: ClassVar[bool] = False
+    """If True, the tool needs a trusted user_id injected before execution.
+
+    Tools that need per-user context (like sandbox tools using SandboxBackendRegistry)
+    set this to True. The ToolRegistry's execute() will then inject the user_id
+    parameter, stripping any LLM-supplied user_id from kwargs first.
+    """
 
     @abstractmethod
     async def run(self, **kwargs) -> ToolResult:

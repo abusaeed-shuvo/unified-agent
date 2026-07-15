@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from ua.sandbox.base import SandboxManager
+from ua.sandbox.registry import SandboxBackendRegistry, SandboxUnavailableError
 from ua.sandbox.risk_detection import is_risky_command
 from ua.tools.base import Tool, ToolResult
 
@@ -68,27 +68,33 @@ class SandboxExecuteTool(Tool):
         },
         "required": ["project_id", "command"],
     }
+    requires_user_context = True
+    """This tool requires user_id for backend resolution via SandboxBackendRegistry."""
 
     def __init__(
         self,
-        sandbox_manager: SandboxManager,
+        backend_registry: SandboxBackendRegistry,
         confirmation_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         """Initialize the sandbox execute tool.
 
         Args:
-            sandbox_manager: A SandboxManager instance for remote operations.
-                            This is a required constructor argument and the tool
-                            cannot be auto-discovered.
+            backend_registry: A SandboxBackendRegistry instance for backend resolution.
+                              This is a required constructor argument and the tool
+                              cannot be auto-discovered.
             confirmation_callback: Optional async callback for confirming risky commands.
                                   Receives (command, reason) when a risky pattern
                                   is detected. If None, risky commands are auto-rejected.
         """
-        self._sandbox_manager = sandbox_manager
+        self._backend_registry = backend_registry
         self._confirmation_callback = confirmation_callback
 
     async def run(
-        self, project_id: str, command: str, timeout: float = 60.0
+        self,
+        project_id: str,
+        command: str,
+        timeout: float = 60.0,
+        _user_id: str | None = None,
     ) -> ToolResult:
         """Execute a command in the remote sandbox.
 
@@ -96,11 +102,19 @@ class SandboxExecuteTool(Tool):
             project_id: The project identifier.
             command: The shell command to execute.
             timeout: Maximum execution time in seconds (default 60.0).
+            _user_id: Internal parameter for trusted user_id (injected by registry).
 
         Returns:
             ToolResult with success=True and the command output,
             or success=False with an error message.
         """
+        # Resolve the appropriate backend manager for this user
+        # Fail gracefully if no backend is available
+        try:
+            sandbox_manager = await self._backend_registry.resolve(_user_id or "default")
+        except SandboxUnavailableError as e:
+            return ToolResult(success=False, output="", error=f"Sandbox unavailable: {e}")
+
         # Check for risky command patterns
         is_risky, risk_reason = is_risky_command(command)
 
@@ -135,7 +149,7 @@ class SandboxExecuteTool(Tool):
 
         # Execute the command
         try:
-            exit_code, stdout, stderr = await self._sandbox_manager.execute(
+            exit_code, stdout, stderr = await sandbox_manager.execute(
                 project_id, command, timeout
             )
             if exit_code == 0:

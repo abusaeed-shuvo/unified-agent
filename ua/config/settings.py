@@ -46,6 +46,11 @@ class Settings(BaseSettings):
     sandbox_docker_binary: str = "docker"
     """Path to docker binary, allows override for testing / non-standard install paths."""
 
+    sandbox_default_backend: str = "ssh"
+    """Default sandbox backend to use when user has no stored preference."""
+    sandbox_fallback_order: list[str] = ["ssh", "docker"]
+    """Order to try backends when the preferred one is unavailable."""
+
     model_config = SettingsConfigDict(env_prefix="UA_", env_file=".env")
 
 

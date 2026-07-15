@@ -183,8 +183,15 @@ class ToolRegistry:
             )
         return schemas
 
-    async def execute(self, name: str, **kwargs) -> ToolResult:
+    async def execute(self, name: str, user_id: str | None = None, **kwargs) -> ToolResult:
         """Look up the tool by *name* and await its ``run(**kwargs)``.
+
+        Args:
+            name: The tool name to execute.
+            user_id: Optional trusted user identifier. If the tool has
+                     requires_user_context=True, this value is injected into kwargs
+                     as "_user_id" after stripping any LLM-supplied value.
+            **kwargs: Arguments to pass to the tool's run() method.
 
         Raises
         ------
@@ -192,6 +199,16 @@ class ToolRegistry:
             If no tool with *name* has been registered.
         """
         tool = self.get(name)
+
+        # SECURITY: Strip any LLM-supplied _user_id before we possibly inject
+        # the trusted value. This prevents the LLM from spoofing another user's
+        # sandbox/backend preferences.
+        kwargs.pop("_user_id", None)
+
+        # If the tool requires user context, inject the trusted user_id
+        if getattr(tool, "requires_user_context", False):
+            kwargs["_user_id"] = user_id
+
         start = time.monotonic()
         try:
             result = await tool.run(**kwargs)
