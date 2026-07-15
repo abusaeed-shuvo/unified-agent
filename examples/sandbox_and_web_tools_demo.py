@@ -51,6 +51,15 @@ class MockSandboxManager(SSHSandboxManager):
         self._settings = None
         self._connection = None
 
+    @property
+    def backend_name(self) -> str:
+        """Return the backend identifier for mock."""
+        return "ssh"
+
+    async def is_available(self) -> bool:
+        """Mock is_available - always returns True."""
+        return True
+
     async def write_file(
         self, project_id: str, relative_path: str, content: str
     ) -> None:
@@ -67,6 +76,10 @@ class MockSandboxManager(SSHSandboxManager):
             return (0, "total 8\n-rw-r--r-- 1 user user  123 Jul 13 2026 demo.txt\n", "")
         else:
             return (0, f"Mock output for: {command}", "")
+
+    async def ensure_project_dir(self, project_id: str) -> str:
+        """Mock ensure_project_dir."""
+        return f"/home/sandbox/projects/{project_id}"
 
 
 class MockSearchBackend(SearchBackend):

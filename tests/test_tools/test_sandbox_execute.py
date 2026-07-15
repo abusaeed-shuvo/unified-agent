@@ -4,7 +4,7 @@ from unittest.mock import AsyncMock, MagicMock, patch
 
 import pytest
 
-from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.base import SandboxManager
 from ua.tools.registry import ToolRegistry
 from ua.tools.sandbox_execute import SandboxExecuteTool
 
@@ -12,7 +12,7 @@ from ua.tools.sandbox_execute import SandboxExecuteTool
 @pytest.mark.asyncio
 async def test_execute_tool_success():
     """Test successful command execution via the tool."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "Hello, stdout!", ""))
 
     tool = SandboxExecuteTool(sandbox_manager=mock_mgr)
@@ -26,7 +26,7 @@ async def test_execute_tool_success():
 @pytest.mark.asyncio
 async def test_execute_tool_fails_closed_when_unconfigured():
     """Test that tool fails closed when sandbox_host is None."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(
         side_effect=Exception("Sandbox host not configured")
     )
@@ -46,7 +46,7 @@ async def test_execute_tool_not_auto_discovered_by_registry():
 
     # This should not raise during discovery - the tool will be skipped
     # because it requires constructor args (sandbox_manager)
-    with patch("ua.tools.sandbox_execute.SSHSandboxManager") as mock_mgr_cls:
+    with patch("ua.tools.sandbox_execute.SandboxManager") as mock_mgr_cls:
         mock_mgr = MagicMock()
         mock_mgr_cls.return_value = mock_mgr
 
@@ -56,7 +56,7 @@ async def test_execute_tool_not_auto_discovered_by_registry():
             SandboxExecuteTool()
 
         # And verify it works with register_instance
-        mock_mgr = MagicMock(spec=SSHSandboxManager)
+        mock_mgr = MagicMock(spec=SandboxManager)
         mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
         tool = SandboxExecuteTool(sandbox_manager=mock_mgr)
         registry.register_instance(tool)
@@ -73,7 +73,7 @@ async def test_execute_tool_not_auto_discovered_by_registry():
 @pytest.mark.asyncio
 async def test_risky_command_auto_rejected_when_no_callback():
     """Risky command with no callback is auto-rejected, execute() never called."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
 
     # Tool without callback
@@ -90,7 +90,7 @@ async def test_risky_command_auto_rejected_when_no_callback():
 @pytest.mark.asyncio
 async def test_risky_command_proceeds_when_callback_confirms():
     """Risky command with confirming callback proceeds to execute."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
 
     async def confirm(cmd: str, reason: str) -> bool:
@@ -107,7 +107,7 @@ async def test_risky_command_proceeds_when_callback_confirms():
 @pytest.mark.asyncio
 async def test_risky_command_rejected_when_callback_denies():
     """Risky command with denying callback is rejected."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
 
     async def deny(cmd: str, reason: str) -> bool:
@@ -124,7 +124,7 @@ async def test_risky_command_rejected_when_callback_denies():
 @pytest.mark.asyncio
 async def test_risky_command_rejected_when_callback_raises_exception():
     """Callback that raises exception is treated as denial (fail-closed)."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
 
     async def raise_error(cmd: str, reason: str) -> bool:
@@ -141,7 +141,7 @@ async def test_risky_command_rejected_when_callback_raises_exception():
 @pytest.mark.asyncio
 async def test_non_risky_command_executes_without_invoking_callback():
     """Non-risky command executes immediately without invoking callback at all."""
-    mock_mgr = MagicMock(spec=SSHSandboxManager)
+    mock_mgr = MagicMock(spec=SandboxManager)
     mock_mgr.execute = AsyncMock(return_value=(0, "output", ""))
 
     call_tracker = []

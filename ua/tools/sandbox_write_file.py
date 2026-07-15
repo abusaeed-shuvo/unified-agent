@@ -6,7 +6,7 @@ Do not expose this tool to an agent with real autonomy against a real host until
 that protection is added.
 """
 
-from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.base import SandboxManager
 from ua.tools.base import Tool, ToolResult
 
 
@@ -49,11 +49,11 @@ class SandboxWriteFileTool(Tool):
         "required": ["project_id", "relative_path", "content"],
     }
 
-    def __init__(self, sandbox_manager: SSHSandboxManager) -> None:
+    def __init__(self, sandbox_manager: SandboxManager) -> None:
         """Initialize the sandbox write file tool.
 
         Args:
-            sandbox_manager: An SSHSandboxManager instance for remote operations.
+            sandbox_manager: A SandboxManager instance for remote operations.
                            This is a required constructor argument and the tool
                            cannot be auto-discovered.
         """

@@ -23,6 +23,7 @@ from pathlib import Path
 import asyncssh
 
 from ua.config.settings import Settings, get_settings
+from ua.sandbox.base import SandboxManager
 
 
 class SSHSandboxNotConfiguredError(Exception):
@@ -33,7 +34,7 @@ class SSHSandboxConnectionError(Exception):
     """Raised when SSH connection to sandbox host fails."""
 
 
-class SSHSandboxManager:
+class SSHSandboxManager(SandboxManager):
     """Manager for SSH connections to a remote sandbox host.
 
     This class handles:
@@ -70,6 +71,30 @@ class SSHSandboxManager:
 
         self._settings = settings
         self._connection: asyncssh.SSHClientConnection | None = None
+
+    @property
+    def backend_name(self) -> str:
+        """Return the backend identifier for SSH."""
+        return "ssh"
+
+    async def is_available(self) -> bool:
+        """Check if the SSH sandbox backend is available.
+
+        Performs a lightweight connection check to verify the backend can be used.
+
+        Returns:
+            True if the host is configured and reachable, False on any failure.
+        """
+        if not self._is_configured():
+            return False
+
+        try:
+            conn = await self._get_connection()
+            # Run a trivial command with a short timeout to verify connection works
+            await asyncio.wait_for(conn.run("echo ok", check=False), timeout=5.0)
+            return True
+        except Exception:
+            return False
 
     def _is_configured(self) -> bool:
         """Check if the sandbox is configured (host is set)."""

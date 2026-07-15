@@ -284,3 +284,89 @@ async def test_fail_closed_when_sandbox_host_not_configured():
     # ensure_project_dir should raise SSHSandboxNotConfiguredError
     with pytest.raises(SSHSandboxNotConfiguredError):
         await mgr.ensure_project_dir("project")
+
+
+# ---------------------------------------------------------------------------
+# Tests for is_available() and backend_name (Batch 39)
+# ---------------------------------------------------------------------------
+
+
+@pytest.mark.asyncio
+async def test_backend_name_returns_ssh():
+    """Test that backend_name returns 'ssh'."""
+    settings = Settings(sandbox_host="sandbox.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    assert mgr.backend_name == "ssh"
+
+
+@pytest.mark.asyncio
+async def test_is_available_true_when_connection_succeeds_mocked():
+    """Test is_available returns True when connection works."""
+    settings = Settings(sandbox_host="sandbox.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
+        mock_conn = _make_mock_connection()
+        mock_connect.return_value = mock_conn
+
+        result = await mgr.is_available()
+
+        assert result is True
+
+
+@pytest.mark.asyncio
+async def test_is_available_false_when_connection_fails_mocked():
+    """Test is_available returns False when connection fails."""
+    settings = Settings(sandbox_host="unreachable.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
+        mock_connect.side_effect = Exception("Connection refused")
+
+        result = await mgr.is_available()
+
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_is_available_false_when_not_configured():
+    """Test is_available returns False when sandbox_host is None."""
+    settings = Settings(sandbox_host=None)
+    mgr = SSHSandboxManager(settings=settings)
+
+    # is_available should return False, not raise
+    result = await mgr.is_available()
+    assert result is False
+
+
+@pytest.mark.asyncio
+async def test_is_available_false_on_timeout():
+    """Test is_available returns False on timeout."""
+    settings = Settings(sandbox_host="slow.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    async def slow_run(*args, **kwargs):
+        await asyncio.sleep(10)
+        return MagicMock(exit_status=0, stdout="", stderr="")
+
+    with patch("asyncssh.connect", new_callable=AsyncMock) as mock_connect:
+        mock_conn = MagicMock()
+        mock_conn.is_closed = MagicMock(return_value=False)
+        mock_conn.run = AsyncMock(side_effect=slow_run)
+        mock_connect.return_value = mock_conn
+
+        # is_available should return False on timeout, not raise
+        result = await mgr.is_available()
+        assert result is False
+
+
+@pytest.mark.asyncio
+async def test_ssh_sandbox_manager_isinstance_of_abstract_base():
+    """Test that SSHSandboxManager is an instance of SandboxManager ABC."""
+    from ua.sandbox.base import SandboxManager
+
+    settings = Settings(sandbox_host="sandbox.example.com")
+    mgr = SSHSandboxManager(settings=settings)
+
+    assert isinstance(mgr, SandboxManager)

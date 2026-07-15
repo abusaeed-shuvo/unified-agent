@@ -21,7 +21,7 @@ from __future__ import annotations
 
 from collections.abc import Awaitable, Callable
 
-from ua.sandbox.manager import SSHSandboxManager
+from ua.sandbox.base import SandboxManager
 from ua.sandbox.risk_detection import is_risky_command
 from ua.tools.base import Tool, ToolResult
 
@@ -71,13 +71,13 @@ class SandboxExecuteTool(Tool):
 
     def __init__(
         self,
-        sandbox_manager: SSHSandboxManager,
+        sandbox_manager: SandboxManager,
         confirmation_callback: Callable[[str, str], Awaitable[bool]] | None = None,
     ) -> None:
         """Initialize the sandbox execute tool.
 
         Args:
-            sandbox_manager: An SSHSandboxManager instance for remote operations.
+            sandbox_manager: A SandboxManager instance for remote operations.
                             This is a required constructor argument and the tool
                             cannot be auto-discovered.
             confirmation_callback: Optional async callback for confirming risky commands.
