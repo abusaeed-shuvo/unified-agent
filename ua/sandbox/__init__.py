@@ -6,6 +6,7 @@ per-project working directories.
 """
 
 from ua.sandbox.base import SandboxManager
+from ua.sandbox.docker_manager import DockerSandboxManager
 from ua.sandbox.manager import SSHSandboxManager
 
-__all__ = ["SandboxManager", "SSHSandboxManager"]
+__all__ = ["SandboxManager", "SSHSandboxManager", "DockerSandboxManager"]

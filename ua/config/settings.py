@@ -36,6 +36,16 @@ class Settings(BaseSettings):
     sandbox_key_path: str | None = None
     """Path to an SSH private key file for authentication (NOT raw key material)."""
 
+    # Docker sandbox settings
+    sandbox_docker_image: str = "python:3.12-slim"
+    """Base image for new sandbox containers."""
+    sandbox_docker_memory_limit: str = "512m"
+    """Memory limit for sandbox containers (e.g., '512m', '1g')."""
+    sandbox_docker_cpu_limit: str = "1.0"
+    """CPU limit for sandbox containers (e.g., '0.5', '1.0', '2.0')."""
+    sandbox_docker_binary: str = "docker"
+    """Path to docker binary, allows override for testing / non-standard install paths."""
+
     model_config = SettingsConfigDict(env_prefix="UA_", env_file=".env")
 
 
