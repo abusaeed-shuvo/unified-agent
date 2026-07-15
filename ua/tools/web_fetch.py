@@ -145,23 +145,13 @@ class _AnyIOStream(httpcore.AsyncNetworkStream):
         if info == "server_addr":
             return self._stream.extra(anyio.abc.SocketAttribute.remote_address, None)
         if info == "socket":
-            return self._stream.extra(anyio.abc.SocketAttribute.raw_socket, None)
-        if info == "is_readable":
-            sock = self._stream.extra(anyio.abc.SocketAttribute.raw_socket, None)
-            return sock is not None and self._sock_has_data(sock)
+            # Only return raw_socket if it's a real socket, not a TransportSocket
+            raw = self._stream.extra(anyio.abc.SocketAttribute.raw_socket, None)
+            if isinstance(raw, socket.socket):
+                return raw
+            return None
+        # Return None for is_readable - httpcore will use other health checks
         return None
-
-    def _sock_has_data(self, sock: socket.socket) -> bool:
-        """Check if socket has data available (non-blocking check)."""
-        try:
-            sock.setblocking(False)
-            data = sock.recv(1, socket.MSG_PEEK | socket.MSG_DONTWAIT)
-            sock.setblocking(True)
-            return len(data) > 0
-        except BlockingIOError:
-            return False
-        except OSError:
-            return False
 
 
 class PinnedIPNetworkBackend(httpcore.AsyncNetworkBackend):

@@ -426,37 +426,24 @@ async def test_dns_rebinding_blocked_with_real_request():
 
 
 # ---------------------------------------------------------------------------
-# Unit test: Verify DNS rebinding is blocked via IP pinning (no real network)
+# End-to-end test: Real HTTPS request with IP pinning (actual network call)
 # ---------------------------------------------------------------------------
 
 
 @pytest.mark.asyncio
-async def test_dns_rebinding_blocked_via_ip_pinning():
-    """Verify DNS rebinding is mitigated by IP pinning at the transport level.
+async def test_real_https_fetch_with_ip_pinning():
+    """End-to-end test: Verify IP pinning works with real HTTPS and SNI.
 
-    This test verifies that the PinnedIPNetworkBackend correctly:
-    1. Connects to the pre-resolved IP (not re-resolving)
-    2. Can create a stream that gets passed to httpcore
-    3. Does NOT attempt to resolve the hostname again in the request path
+    This test makes an ACTUAL HTTPS request to example.com using the pinned IP
+    transport. If SNI were broken (IP in URL instead of hostname), the TLS handshake
+    would fail because the certificate wouldn't match.
 
-    We verify this without making a real network connection by mocking the
-    anyio.connect_tcp call and checking it's called with the validated IP.
+    The test passes if the request succeeds and returns real content.
     """
-    from unittest.mock import AsyncMock, patch as mock_patch
+    tool = WebFetchTool()
+    result = await tool.run("https://example.com/")
 
-    # Create a mock stream to return from anyio.connect_tcp
-    mock_stream = MagicMock()
-    mock_stream.receive = AsyncMock(return_value=b"HTTP/1.1 200 OK\r\n\r\n<html><body>Test</body></html>")
-    mock_stream.send = AsyncMock()
-    mock_stream.aclose = AsyncMock()
-
-    with mock_patch("anyio.connect_tcp", new_callable=lambda: AsyncMock(return_value=mock_stream)):
-        backend = PinnedIPNetworkBackend("93.184.216.34", 443)
-
-        # The key assertion: connect_tcp is called with the validated IP, not the hostname
-        stream = await backend.connect_tcp("example.com", 443, timeout=5.0)
-
-        assert stream is not None, "Should return a stream object"
-
-    # Note: We can't test real TLS connection in this environment due to network restrictions,
-    # but the implementation follows httpcore's AnyIOStream pattern exactly.
+    # The request should succeed (proving SNI works)
+    assert result.success is True, f"Expected success, got error: {result.error}"
+    assert "Example Domain" in result.output or "example" in result.output.lower()
+    assert len(result.output) > 100  # Should have meaningful content
