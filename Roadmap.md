@@ -69,6 +69,8 @@ Batches within the same indentation level (e.g., 08/09/10, or 22/23/24) can be d
 
 **Phase 5 — Hardening & Polish (Batches 25–33):** tool-calling loop robustness, retries, memory compaction, personality switching, observability, test cleanup, examples, docs, packaging.
 
+**Phase 6 — Sandboxed Execution & Web Tools (Batches 34–38):** remote SSH sandbox tools with destructive-command detection, SSRF-protected web fetch with DNS rebinding mitigation, and DuckDuckGo-based web search with pluggable backend architecture.
+
 This gets to a genuinely useful, multi-interface, tool-using agent by the end of Phase 4 (batch 24), with Phase 5 turning it into something production-respectable.
 
 
@@ -122,7 +124,17 @@ This section provides a high-level overview of development progress for public v
 - Complete documentation suite in docs/
 - Packaging and distribution readiness
 
----
+### Sandboxed Execution & Web Tools (Batches 34-38) ✓
+- SSH sandbox manager with remote command execution and file writing (`ua/sandbox/manager.py`)
+- Sandbox execute tool with destructive-command detection and CLI-only confirmation gating
+- Sandbox write file tool with path traversal and shell metacharacter protection
+- Risk detection module with blacklist-based pattern matching (`ua/sandbox/risk_detection.py`)
+- SSRF-guard URL validation with DNS rebinding mitigation via IP pinning (`ua/web/ssrf_guard.py`)
+- Web fetch tool with HTML extraction, size limits, and manual redirect handling (`ua/tools/web_fetch.py`)
+- Search backend abstraction with DuckDuckGo HTML scraper implementation (`ua/web/search_backend.py`)
+- Web search tool with pluggable backend architecture (`ua/tools/web_search.py`)
+- "coding" personality optimized for tool-using development workflows (`personalities/coding/`)
+
 
 
 ### Batch 01 — Project Scaffold
@@ -1476,6 +1488,318 @@ def run() -> None: ...  # entrypoint: configure_logging(), build_default_agent()
 
 **Common mistakes to avoid:**
 - Don't scope-creep into Docker/K8s packaging — that's explicitly a future feature, not part of v1.
+
+---
+
+### Batch 34 — SSH Sandbox Infrastructure
+
+**Objective:** Implement `ua/sandbox/manager.py` with SSH connection management to a remote sandbox host, providing `execute()` and `write_file()` methods for remote operations.
+
+**Why this batch exists:** The agent needs safe, isolated execution environments for running untrusted code. A disposable SSH sandbox provides containment without container orchestration complexity.
+
+**Files to create:**
+- `ua/sandbox/manager.py`
+- `ua/sandbox/__init__.py` (exposes `SSHSandboxManager`, `SSHSandboxNotConfiguredError`, `SSHSandboxConnectionError`)
+
+**Files to modify:**
+- `ua/config/settings.py` — add sandbox configuration fields (`sandbox_host`, `sandbox_port`, `sandbox_username`, `sandbox_key_path`)
+
+**Public APIs to implement:**
+```python
+class SSHSandboxManager:
+    def __init__(self, settings: Settings | None = None) -> None: ...
+    async def execute(self, project_id: str, command: str, timeout: float = 60.0) -> tuple[int, str, str]: ...
+    async def write_file(self, project_id: str, relative_path: str, content: str) -> None: ...
+    async def ensure_project_dir(self, project_id: str) -> str: ...
+    async def is_reachable(self) -> bool: ...
+    async def close(self) -> None: ...
+
+class SSHSandboxNotConfiguredError(Exception): ...
+class SSHSandboxConnectionError(Exception): ...
+```
+
+**Internal implementation notes:**
+- Uses `asyncssh` for async SSH connections.
+- Validates project_id with alphanumeric/+hyphens/underscores only to prevent path injection.
+- Validates relative_path against path traversal (`..`) and null bytes.
+- Accepts `known_hosts=None` for disposable sandbox hosts (documented MITM risk).
+- Returns `(exit_code, stdout, stderr)` tuple from `execute()`.
+
+**Acceptance criteria:**
+- With mocked SSH connection, `execute()` returns correct exit code/stdout/stderr.
+- Invalid project_id raises `ValueError`.
+- Unconfigured sandbox (sandbox_host=None) raises `SSHSandboxNotConfiguredError`.
+- `is_reachable()` returns True when connection succeeds, False on error.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_sandbox/test_manager.py -v` to verify mocked tests pass.
+
+**Suggested pytest tests:**
+- `tests/test_sandbox/test_manager.py::test_ensure_project_dir_creates_directory_via_mocked_ssh`
+- `tests/test_sandbox/test_manager.py::test_write_file_success_via_mocked_ssh`
+- `tests/test_sandbox/test_manager.py::test_execute_success_via_mocked_ssh_returns_exit_code_stdout_stderr`
+- `tests/test_sandbox/test_manager.py::test_ensure_project_dir_rejects_invalid_project_id`
+- `tests/test_sandbox/test_manager.py::test_write_file_path_traversal_rejected`
+- `tests/test_sandbox/test_manager.py::test_is_reachable_true_when_connection_succeeds_mocked`
+- `tests/test_sandbox/test_manager.py::test_is_reachable_false_when_connection_fails_mocked`
+- `tests/test_sandbox/test_manager.py::test_fail_closed_when_sandbox_host_not_configured`
+
+**Suggested Git commit message:** `sandbox: add SSH sandbox manager for remote execution`
+
+**Dependencies on previous batches:** Batch 02 (Settings), Batch 21 (Tool interface).
+
+**Common mistakes to avoid:**
+- Don't use sync SSH libraries (like paramiko) — the async pattern must be preserved.
+- Don't hardcode paths or credentials; always read from Settings.
+
+---
+
+### Batch 35 — Sandbox Execute Tool with Confirmation Gating
+
+**Objective:** Implement `SandboxExecuteTool` wrapping `SSHSandboxManager.execute()` with destructive-command detection and confirmation gating for CLI interfaces.
+
+**Why this batch exists:** Direct command execution is powerful but dangerous. Risk detection provides defense-in-depth while the confirmation callback allows CLI users to approve risky operations.
+
+**Files to create:**
+- `ua/tools/sandbox_execute.py`
+- `ua/sandbox/risk_detection.py` (pattern matching for destructive commands)
+
+**Files to modify:**
+- `ua/config/settings.py` — sandbox settings already added in Batch 34
+
+**Public APIs to implement:**
+```python
+# risk_detection.py
+def is_risky_command(command: str) -> tuple[bool, str]:
+    """Check if a command matches known-dangerous patterns.
+
+    Returns (is_risky, reason) tuple.
+    """
+
+# sandbox_execute.py
+class SandboxExecuteTool(Tool):
+    name = "sandbox_execute"
+    description = "Execute a shell command within a remote sandbox project directory."
+    parameters = {"type": "object", "properties": {...}, "required": ["project_id", "command"]}
+
+    def __init__(self, sandbox_manager: SSHSandboxManager, confirmation_callback: Callable | None = None): ...
+    async def run(self, project_id: str, command: str, timeout: float = 60.0) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- Risk detection uses blacklist-based regex patterns (rm -rf, sudo, dd, mkfs, shutdown, fork bombs, curl|bash, git push -f, etc.).
+- If `confirmation_callback` is None, risky commands are auto-rejected.
+- If callback raises an exception, treat it as denial (fail-closed).
+- The tool requires `sandbox_manager` constructor argument and cannot be auto-discovered.
+
+**Acceptance criteria:**
+- Non-risky command executes immediately without invoking callback.
+- Risky command with no callback returns `ToolResult(success=False, error="rejected...")`.
+- Risky command with confirming callback proceeds to execute.
+- Risky command with denying callback is rejected.
+- Callback that raises exception is treated as denial.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_tools/test_sandbox_execute.py -v` to verify all confirmation gating tests.
+
+**Suggested pytest tests:**
+- `tests/test_tools/test_sandbox_execute.py::test_execute_tool_success`
+- `tests/test_tools/test_sandbox_execute.py::test_risky_command_auto_rejected_when_no_callback`
+- `tests/test_tools/test_sandbox_execute.py::test_risky_command_proceeds_when_callback_confirms`
+- `tests/test_tools/test_sandbox_execute.py::test_risky_command_rejected_when_callback_denies`
+- `tests/test_tools/test_sandbox_execute.py::test_risky_command_rejected_when_callback_raises_exception`
+- `tests/test_tools/test_sandbox_execute.py::test_non_risky_command_executes_without_invoking_callback`
+- `tests/test_sandbox/test_risk_detection.py` — all pattern detection tests
+
+**Suggested Git commit message:** `tools: add sandbox execute tool with destructive-command detection`
+
+**Dependencies on previous batches:** Batch 34 (SSHSandboxManager).
+
+**Common mistakes to avoid:**
+- Don't rely on risk detection as primary security — document it as defense-in-depth.
+- Don't forget that Web API/Discord reject risky commands automatically (no callback available).
+
+---
+
+### Batch 36 — Sandbox Write File Tool
+
+**Objective:** Implement `SandboxWriteFileTool` wrapping `SSHSandboxManager.write_file()` with path validation for safe file operations.
+
+**Why this batch exists:** Allows the agent to write code and files to the sandbox, but without destructive-command detection (different threat model than execute). Path validation prevents escape attacks.
+
+**Files to create:**
+- `ua/tools/sandbox_write_file.py`
+
+**Public APIs to implement:**
+```python
+class SandboxWriteFileTool(Tool):
+    name = "sandbox_write_file"
+    description = "Write content to a file within a remote sandbox project directory."
+    parameters = {"type": "object", "properties": {"project_id": str, "relative_path": str, "content": str}, "required": [...]}
+
+    def __init__(self, sandbox_manager: SSHSandboxManager) -> None: ...
+    async def run(self, project_id: str, relative_path: str, content: str) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- Uses SFTP for atomic file writes, avoiding shell injection.
+- Validates relative_path: rejects `..` path traversal, null bytes, and shell metacharacters.
+- Does NOT include destructive-command detection (planned for future batch) — add warning in docstring.
+- Cannot be auto-discovered due to required `sandbox_manager` constructor argument.
+
+**Acceptance criteria:**
+- Valid paths succeed with `ToolResult(success=True, output="File written: ...")`.
+- Path traversal attempts are rejected with `ValueError`.
+- Shell metacharacters in path are rejected.
+- Null bytes in path are rejected.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_tools/test_sandbox_write_file.py -v` to verify path validation.
+
+**Suggested pytest tests:**
+- `tests/test_tools/test_sandbox_write_file.py::test_write_file_tool_success`
+- `tests/test_tools/test_sandbox_write_file.py::test_write_file_tool_fails_closed_when_unconfigured`
+- `tests/test_tools/test_sandbox_write_file.py::test_write_file_tool_description_contains_no_confirmation_warning`
+
+**Suggested Git commit message:** `tools: add sandbox write file tool with path validation`
+
+**Dependencies on previous batches:** Batch 34 (SSHSandboxManager).
+
+**Common mistakes to avoid:**
+- Don't use shell-based writes; always use SFTP.
+- Don't skip the warning about lack of destructive-command detection.
+
+---
+
+### Batch 37 — SSRF-Guarded Web Fetch Tool
+
+**Objective:** Implement `ua/web/ssrf_guard.py` for URL safety validation and `ua/tools/web_fetch.py` for fetching URLs with SSRF protection, DNS rebinding mitigation, and HTML text extraction.
+
+**Why this batch exists:** Web fetching is essential for research but introduces SSRF attack vectors. IP pinning prevents DNS rebinding while preserving SNI for HTTPS certificate validation.
+
+**Files to create:**
+- `ua/web/ssrf_guard.py`
+- `ua/tools/web_fetch.py`
+
+**Public APIs to implement:**
+```python
+# ssrf_guard.py
+def is_url_safe(url: str) -> tuple[bool, str]: ...
+def get_safe_url_with_resolved_ip(url: str) -> tuple[str, str, int] | tuple[None, None, None]: ...
+
+# web_fetch.py
+class WebFetchTool(Tool):
+    name = "web_fetch"
+    description = "Fetch a URL and extract readable text content with SSRF protection."
+    parameters = {"type": "object", "properties": {"url": {"type": "string"}}, "required": ["url"]}
+
+    def __init__(self) -> None: ...
+    async def run(self, url: str) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- Blocks private IP ranges (10.0.0.0/8, 172.16.0.0/12, 192.168.0.0/16, 127.0.0.0/8, link-local).
+- Uses custom `PinnedIPNetworkBackend` to connect to validated IP while preserving hostname in URL for SNI.
+- Size limit of 1MB enforced via streaming; extracted text truncated to ~5000 characters.
+- Manual redirect handling with SSRF re-validation on each redirect target.
+- Uses stdlib `html.parser.HTMLParser` for simple tag stripping.
+
+**Acceptance criteria:**
+- URLs resolving to private/internal IPs are rejected without HTTP request.
+- Cloud metadata endpoint (169.254.169.254) is blocked.
+- DNS rebinding is mitigated (IP pinned, hostname preserved for SNI).
+- Redirects to unsafe URLs are rejected.
+- Response size over 1MB triggers error.
+- HTML is extracted and whitespace collapsed.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_web/test_ssrf_guard.py tests/test_tools/test_web_fetch.py -v` to verify SSRF protection and fetching.
+
+**Suggested pytest tests:**
+- `tests/test_web/test_ssrf_guard.py` — all URL validation tests (blocked/allowed IPs)
+- `tests/test_tools/test_web_fetch.py::test_fetch_rejects_unsafe_url_before_making_request`
+- `tests/test_tools/test_web_fetch.py::test_fetch_handles_connection_error_gracefully`
+- `tests/test_tools/test_web_fetch.py::test_fetch_enforces_size_cap`
+- `tests/test_tools/test_web_fetch.py::test_dns_rebinding_mitigation_via_ip_pinning`
+- `tests/test_tools/test_web_fetch.py::test_real_https_fetch_with_ip_pinning`
+
+**Suggested Git commit message:** `web: add SSRF-protected web fetch tool with DNS rebinding mitigation`
+
+**Dependencies on previous batches:** Batch 15 (Tool interface), Batch 03 (logging).
+
+**Common mistakes to avoid:**
+- Don't use `follow_redirects=True` without SSRF validation on redirect targets.
+- Don't connect to hostnames directly without IP pinning.
+
+---
+
+### Batch 38 — Web Search Tool with Pluggable Backend
+
+**Objective:** Implement `ua/web/search_backend.py` abstract interface with DuckDuckGo HTML scraper implementation, and `ua/tools/web_search.py` tool exposing web search with pluggable backend architecture.
+
+**Why this batch exists:** Web search enables the agent to find current information. A backend abstraction allows swapping providers without changing tool code, while DuckDuckGo HTML scraping provides zero-config access.
+
+**Files to create:**
+- `ua/web/search_backend.py`
+- `ua/tools/web_search.py`
+- `examples/sandbox_and_web_tools_demo.py` (demonstrates all Phase 6 tools together)
+
+**Public APIs to implement:**
+```python
+# search_backend.py
+@dataclass
+class SearchResult:
+    title: str
+    url: str
+    snippet: str
+
+class SearchBackend(ABC):
+    @abstractmethod
+    async def search(self, query: str, max_results: int) -> list[SearchResult]: ...
+
+class DuckDuckGoHTMLBackend(SearchBackend): ...
+
+# web_search.py
+class WebSearchTool(Tool):
+    name = "web_search"
+    description = "Search the web for information."
+    parameters = {"type": "object", "properties": {"query": str, "max_results": int}, "required": ["query"]}
+
+    def __init__(self, backend: SearchBackend | None = None) -> None: ...
+    async def run(self, query: str, max_results: int = 5) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- `DuckDuckGoHTMLBackend` scrapes `https://html.duckduckgo.com/html/` with POST request.
+- Connection/parsing errors return empty list (not exceptions) for resilience.
+- `WebSearchTool` can accept custom `SearchBackend` for dependency injection.
+- Hard cap of 10 on `max_results` to prevent excessive scraping.
+- Legal/ToS caveats documented in module docstrings (scraping fragility and terms of service concerns).
+
+**Acceptance criteria:**
+- With mocked backend, tool returns JSON-formatted results with title/URL/snippet.
+- Zero results returns appropriate ToolResult (success=True with ambiguity note).
+- `max_results` is hard-capped at 10.
+- Tool can be auto-discovered by `ToolRegistry`.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_web/test_search_backend.py tests/test_tools/test_web_search.py -v` to verify backend and tool.
+2. Run `UA_LLM_PROVIDER=fake uv run python examples/sandbox_and_web_tools_demo.py` for end-to-end demo.
+
+**Suggested pytest tests:**
+- `tests/test_web/test_search_backend.py::test_search_parses_realistic_html_response_into_results`
+- `tests/test_web/test_search_backend.py::test_search_connection_error_handled`
+- `tests/test_tools/test_web_search.py::test_web_search_tool_success_via_mocked_backend`
+- `tests/test_tools/test_web_search.py::test_web_search_tool_auto_discovered_by_registry`
+- `tests/test_tools/test_web_search.py::test_web_search_tool_uses_injected_backend_when_provided`
+
+**Suggested Git commit message:** `web: add web search tool with DuckDuckGo backend abstraction`
+
+**Dependencies on previous batches:** Batch 15 (Tool interface), Batch 31 (examples).
+
+**Common mistakes to avoid:**
+- Don't fail on empty results — return success=True with ambiguity acknowledgment.
+- Don't forget to document the scraping/ToS caveats in docstrings.
 
 ---
 
