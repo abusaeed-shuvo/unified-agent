@@ -145,6 +145,20 @@ class SandboxBackendRegistry:
         stored = await self._memory.get_fact(user_id, "active_sandbox_backend")
         return stored or self._settings.sandbox_default_backend
 
+    async def check_availability(self, backend_name: str) -> bool:
+        """Check if a specific backend is available.
+
+        Args:
+            backend_name: The name of the backend to check.
+
+        Returns:
+            True if the backend is registered and available, False otherwise.
+        """
+        backend = self._backends.get(backend_name)
+        if backend is None:
+            return False
+        return await backend.is_available()
+
     def registered_backends(self) -> list[str]:
         """Return the list of registered backend_name values.
 

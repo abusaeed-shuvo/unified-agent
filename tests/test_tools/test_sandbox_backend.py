@@ -109,31 +109,50 @@ async def test_list_backends_marks_default_as_active_when_no_preference():
 async def test_list_backends_checks_availability_concurrently():
     """action='list' checks availability on all backends concurrently, not sequentially.
 
-    This test verifies that is_available() calls happen in parallel by measuring
+    This test verifies that check_availability() calls happen in parallel by measuring
     timing. If sequential, total time would be sum of delays; if concurrent,
     total time should be close to max delay.
     """
     import asyncio
     import time
 
-    registry, backend_map = _make_mock_registry(["ssh", "docker"])
-    tool = SandboxBackendTool(backend_registry=registry)
+    settings = Settings()
+    mock_memory = MagicMock()
+    mock_memory.get_fact = AsyncMock(return_value=None)
+
+    # Create mock backends with slow is_available
+    call_times: dict[str, list[float]] = {"ssh": [], "docker": []}
 
     async def slow_is_available_ssh() -> bool:
-        start_time = time.time()
+        call_times["ssh"].append(time.time())
         await asyncio.sleep(0.1)
-        call_times["ssh"].append(start_time)
         return True
 
     async def slow_is_available_docker() -> bool:
-        start_time = time.time()
+        call_times["docker"].append(time.time())
         await asyncio.sleep(0.1)
-        call_times["docker"].append(start_time)
         return True
 
-    call_times: dict[str, list[float]] = {"ssh": [], "docker": []}
+    backend_map = {
+        "ssh": _make_mock_backend("ssh", True),
+        "docker": _make_mock_backend("docker", True),
+    }
+    # Override the is_available methods to be slow
     backend_map["ssh"].is_available = slow_is_available_ssh
     backend_map["docker"].is_available = slow_is_available_docker
+
+    registry = SandboxBackendRegistry(
+        backends=backend_map,
+        memory=mock_memory,
+        settings=settings,
+    )
+    tool = SandboxBackendTool(backend_registry=registry)
+
+    # Mock the registry's check_availability to delegate to the backends' is_available
+    async def mock_check_availability(name: str) -> bool:
+        return await registry._backends[name].is_available() if name in registry._backends else False
+
+    registry.check_availability = mock_check_availability
 
     start = time.time()
     result = await tool.run(action="list", _user_id="user1")

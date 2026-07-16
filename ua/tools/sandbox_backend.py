@@ -102,11 +102,8 @@ class SandboxBackendTool(Tool):
 
         # Check availability on all backends concurrently
         async def check_availability(name: str) -> tuple[str, bool]:
-            backend = self._backend_registry._backends.get(name)
-            if backend:
-                available = await backend.is_available()
-                return (name, available)
-            return (name, False)
+            available = await self._backend_registry.check_availability(name)
+            return (name, available)
 
         # Run all availability checks concurrently
         availability_results = await asyncio.gather(
@@ -144,10 +141,7 @@ class SandboxBackendTool(Tool):
             )
 
         # Check if the newly selected backend is currently available
-        backend = self._backend_registry._backends.get(backend_name)
-        is_available = False
-        if backend:
-            is_available = await backend.is_available()
+        is_available = await self._backend_registry.check_availability(backend_name)
 
         if is_available:
             return ToolResult(
