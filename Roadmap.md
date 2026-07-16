@@ -71,6 +71,8 @@ Batches within the same indentation level (e.g., 08/09/10, or 22/23/24) can be d
 
 **Phase 6 — Sandboxed Execution & Web Tools (Batches 34–38):** remote SSH sandbox tools with destructive-command detection, SSRF-protected web fetch with DNS rebinding mitigation, and DuckDuckGo-based web search with pluggable backend architecture.
 
+**Phase 7 — Multi-Backend Sandbox Support (Batches 39–42, in progress):** abstract `SandboxManager` interface for backend-agnostic sandbox operations, `DockerSandboxManager` for local containerized execution, `SandboxBackendRegistry` with per-user backend selection and automatic fallback, and `sandbox_backend` tool for listing/switching backends — all wired together with `requires_user_context` security for LLM-spoof-proof user identification.
+
 This gets to a genuinely useful, multi-interface, tool-using agent by the end of Phase 4 (batch 24), with Phase 5 turning it into something production-respectable.
 
 
@@ -134,6 +136,13 @@ This section provides a high-level overview of development progress for public v
 - Search backend abstraction with DuckDuckGo HTML scraper implementation (`ua/web/search_backend.py`)
 - Web search tool with pluggable backend architecture (`ua/tools/web_search.py`)
 - "coding" personality optimized for tool-using development workflows (`personalities/coding/`)
+
+### Multi-Backend Sandbox Support (Batches 39-42) (in progress)
+- Abstract `SandboxManager` interface (`ua/sandbox/base.py`) defining the contract all backends implement
+- `DockerSandboxManager` (`ua/sandbox/docker_manager.py`) for local containerized sandbox execution with resource limits
+- `SandboxBackendRegistry` (`ua/sandbox/registry.py`) for per-user backend selection with automatic fallback
+- `sandbox_backend` tool (`ua/tools/sandbox_backend.py`) for listing available backends and switching user preference
+- Per-user `requires_user_context` security mechanism in tools to prevent LLM-spoofed user identification
 
 
 
@@ -1799,6 +1808,258 @@ class WebFetchTool(Tool):
 
 **Common mistakes to avoid:**
 - Don't use `follow_redirects=True` without SSRF validation on redirect targets.
+
+---
+
+### Batch 39 — Abstract SandboxManager Interface
+
+**Objective:** Create `ua/sandbox/base.py` with the `SandboxManager` abstract base class that all sandbox backends (SSH, Docker, future Kubernetes) must implement, enabling multi-backend support without redesign.
+
+**Why this batch exists:** The existing `SSHSandboxManager` needs to share a common interface with `DockerSandboxManager` and any future backends. An abstract base class ensures API compatibility and allows the registry to operate on any backend uniformly.
+
+**Files to create:**
+- `ua/sandbox/base.py`
+
+**Files to modify:**
+- `ua/sandbox/manager.py` — refactor to inherit from `SandboxManager` ABC and rename `is_reachable()` to `is_available()`
+
+**Public APIs to implement:**
+```python
+class SandboxManager(ABC):
+    """Abstract interface all sandbox backends (SSH, Docker, future Kubernetes) implement."""
+
+    @abstractmethod
+    async def ensure_project_dir(self, project_id: str) -> str: ...
+
+    @abstractmethod
+    async def write_file(self, project_id: str, relative_path: str, content: str) -> None: ...
+
+    @abstractmethod
+    async def execute(
+        self, project_id: str, command: str, timeout: float = 60.0
+    ) -> tuple[int, str, str]: ...
+
+    @abstractmethod
+    async def is_available(self) -> bool: ...
+
+    @property
+    @abstractmethod
+    def backend_name(self) -> str: ...
+```
+
+**Internal implementation notes:**
+- `is_available()` (replacing the old `is_reachable()`) must never raise — it returns `True`/`False` on any failure, allowing the registry to probe backends without exception handling.
+- `backend_name` is a property (not a method) for ergonomics: `"ssh"`, `"docker"`, etc.
+- The existing `SSHSandboxManager` from Batch 34 already implements this interface; it just needs to inherit from the ABC and rename `is_reachable()` to `is_available()`.
+
+**Acceptance criteria:**
+- `SSHSandboxManager` is an instance of `SandboxManager`.
+- All `SSHSandboxManager` tests pass after the rename (update `is_reachable` tests to `is_available`).
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_sandbox/test_manager.py -v` to verify all tests pass after refactor.
+
+**Suggested pytest tests:**
+- `tests/test_sandbox/test_manager.py::test_ssh_sandbox_manager_isinstance_of_abstract_base`
+- `tests/test_sandbox/test_manager.py::test_backend_name_returns_ssh`
+- `tests/test_sandbox/test_manager.py::test_is_available_true_when_connection_succeeds_mocked`
+- `tests/test_sandbox/test_manager.py::test_is_available_false_when_connection_fails_mocked`
+- `tests/test_sandbox/test_manager.py::test_is_available_false_when_not_configured`
+
+**Suggested Git commit message:** `sandbox: add SandboxManager abstract interface for multi-backend support`
+
+**Dependencies on previous batches:** Batch 34 (SSHSandboxManager exists).
+
+---
+
+### Batch 40 — DockerSandboxManager
+
+**Objective:** Implement `ua/sandbox/docker_manager.py` providing Docker container-based sandbox operations matching the `SandboxManager` interface, with security hardening (cap drops, pids limit, no-new-privileges) and resource limits.
+
+**Why this batch exists:** SSH sandbox requires a remote host. Docker provides a local alternative for developers without SSH infrastructure, while maintaining the same API for transparent backend switching.
+
+**Files to create:**
+- `ua/sandbox/docker_manager.py`
+
+**Files to modify:**
+- `ua/config/settings.py` — add Docker-specific settings (`sandbox_docker_image`, `sandbox_docker_memory_limit`, `sandbox_docker_cpu_limit`, `sandbox_docker_binary`)
+
+**Public APIs to implement:**
+```python
+class DockerSandboxError(Exception): ...
+
+class DockerSandboxManager(SandboxManager):
+    backend_name: str = "docker"
+
+    async def is_available(self) -> bool: ...
+    async def ensure_project_dir(self, project_id: str) -> str: ...
+    async def write_file(self, project_id: str, relative_path: str, content: str) -> None: ...
+    async def execute(self, project_id: str, command: str, timeout: float = 60.0) -> tuple[int, str, str]: ...
+```
+
+**Internal implementation notes:**
+- Uses async subprocess calls to the `docker` binary (not `docker-py` SDK) for simplicity.
+- Creates persistent per-project containers named `ua-sandbox-{project_id}`.
+- Validates `project_id` with alphanumeric + hyphens/underscores regex to prevent container-name injection.
+- Validates `relative_path` against path traversal, null bytes, and shell metacharacters.
+- Uses `docker cp` for file writes to avoid shell injection.
+- Container-side `timeout` command for command execution limits.
+- Security hardening: `--cap-drop ALL`, `--pids-limit 256`, `--security-opt no-new-privileges`.
+
+**Acceptance criteria:**
+- With mocked Docker subprocess, container creation and operations succeed.
+- Malicious `project_id` strings are rejected before any Docker commands.
+- Path traversal and shell metacharacter attacks are rejected in `write_file()`.
+- `is_available()` returns `True` only when Docker daemon responds successfully.
+- **KNOWN RISKS (deferred hardening):** Network isolation not enforced; containers use default bridge networking. No non-root user configured; processes run as image default. See module docstring.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_sandbox/test_docker_manager.py -v` to verify mocked tests pass.
+2. If Docker available, run `test_real_docker_roundtrip` integration test.
+
+**Suggested pytest tests:**
+- `tests/test_sandbox/test_docker_manager.py::test_backend_name_is_docker`
+- `tests/test_sandbox/test_docker_manager.py::test_ensure_project_dir_creates_container_if_not_exists`
+- `tests/test_sandbox/test_docker_manager.py::test_ensure_project_dir_reuses_existing_running_container`
+- `tests/test_sandbox/test_docker_manager.py::test_ensure_project_dir_restarts_stopped_container`
+- `tests/test_sandbox/test_docker_manager.py::test_write_file_uses_docker_cp`
+- `tests/test_sandbox/test_docker_manager.py::test_write_file_rejects_path_traversal`
+- `tests/test_sandbox/test_docker_manager.py::test_write_file_rejects_shell_metacharacters`
+- `tests/test_sandbox/test_docker_manager.py::test_write_file_rejects_null_bytes`
+- `tests/test_sandbox/test_docker_manager.py::test_execute_returns_exit_code_stdout_stderr`
+- `tests/test_sandbox/test_docker_manager.py::test_execute_kills_command_exceeding_timeout`
+- `tests/test_sandbox/test_docker_manager.py::test_is_available_false_when_docker_not_installed`
+- `tests/test_sandbox/test_docker_manager.py::test_is_available_true_when_docker_responds`
+- `tests/test_sandbox/test_docker_manager.py::test_malicious_project_id_rejected_before_shell_interpolation`
+- `tests/test_sandbox/test_docker_manager.py::test_docker_sandbox_manager_isinstance_of_abstract_base`
+
+**Suggested Git commit message:** `sandbox: add DockerSandboxManager for local containerized execution`
+
+**Dependencies on previous batches:** Batch 39 (SandboxManager ABC).
+
+---
+
+### Batch 41 — SandboxBackendRegistry with Per-User Selection and Fallback
+
+**Objective:** Implement `ua/sandbox/registry.py` to hold multiple `SandboxManager` backends, resolve which backend a user prefers (persisted via `MemoryManager`), and automatically fall back when the preferred backend is unavailable.
+
+**Why this batch exists:** Users should be able to choose between SSH and Docker without code changes. Automatic fallback ensures availability even when one backend is offline.
+
+**Files to create:**
+- `ua/sandbox/registry.py`
+
+**Files to modify:**
+- `ua/tools/sandbox_execute.py` — inject `SandboxBackendRegistry` instead of direct `SSHSandboxManager`
+- `ua/tools/sandbox_write_file.py` — inject `SandboxBackendRegistry` instead of direct `SSHSandboxManager`
+
+**Public APIs to implement:**
+```python
+class SandboxUnavailableError(Exception): ...
+
+class SandboxBackendRegistry:
+    def __init__(self, backends: dict[str, SandboxManager], memory: MemoryManager, settings) -> None: ...
+
+    async def resolve(self, user_id: str) -> SandboxManager: ...
+    async def set_active_backend(self, user_id: str, backend_name: str) -> None: ...
+    async def get_stored_preference(self, user_id: str) -> str: ...
+    async def check_availability(self, backend_name: str) -> bool: ...
+    def registered_backends(self) -> list[str]: ...
+```
+
+**Internal implementation notes:**
+- Resolution order: stored preference (or default) → check `is_available()` → if unavailable, walk `sandbox_fallback_order` and return first available backend.
+- Does NOT persist fallback choices automatically — the user's original preference is preserved for when their backend comes back online.
+- `set_active_backend` validates the backend is registered before persisting; does NOT check availability (user can select an offline backend planned for future use).
+- Integrates with existing `requires_user_context` mechanism so tools receive trusted `_user_id`.
+
+**Acceptance criteria:**
+- `resolve()` returns stored preference when available.
+- `resolve()` returns default when no stored preference.
+- `resolve()` falls back to another backend when preferred is unavailable.
+- `resolve()` raises `SandboxUnavailableError` when no backend available.
+- Fallback does NOT persist as the new user preference.
+- `set_active_backend` validates registered backends only.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_sandbox/test_registry.py -v` to verify all tests pass.
+
+**Suggested pytest tests:**
+- `tests/test_sandbox/test_registry.py::test_resolve_returns_stored_preference_when_available`
+- `tests/test_sandbox/test_registry.py::test_resolve_returns_default_when_no_stored_preference`
+- `tests/test_sandbox/test_registry.py::test_resolve_falls_back_when_preferred_unavailable`
+- `tests/test_sandbox/test_registry.py::test_resolve_skips_failed_backend_in_fallback`
+- `tests/test_sandbox/test_registry.py::test_resolve_raises_sandbox_unavailable_when_all_unavailable`
+- `tests/test_sandbox/test_registry.py::test_fallback_does_not_persist`
+- `tests/test_sandbox/test_registry.py::test_still_tries_original_preference_after_fallback`
+- `tests/test_sandbox/test_registry.py::test_set_active_backend_rejects_unregistered_backend`
+- `tests/test_sandbox/test_registry.py::test_set_active_backend_validates_and_persists`
+- `tests/test_sandbox/test_registry.py::test_registered_backends_returns_all_backend_names`
+- `tests/test_sandbox/test_registry.py::test_single_backend_registry_behaves_like_original`
+- `tests/test_sandbox/test_registry.py::test_sandbox_execute_tool_fails_gracefully_when_no_backend_available`
+- `tests/test_sandbox/test_registry.py::test_sandbox_write_file_tool_fails_gracefully_when_no_backend_available`
+
+**Suggested Git commit message:** `sandbox: add SandboxBackendRegistry for per-user backend selection with fallback`
+
+**Dependencies on previous batches:** Batch 39 (SandboxManager ABC), Batch 34 (SSHSandboxManager), Batch 40 (DockerSandboxManager).
+
+---
+
+### Batch 42 — Sandbox Backend Selection Tool
+
+**Objective:** Implement `ua/tools/sandbox_backend.py` as a `Tool` that lists available backends and allows users to switch their active backend preference.
+
+**Why this batch exists:** Users need a way to discover which backends are available and switch their preference without directly manipulating the database. This tool provides that interface with the same `requires_user_context` security as other registry-integrated tools.
+
+**Files to create:**
+- `ua/tools/sandbox_backend.py`
+
+**Public APIs to implement:**
+```python
+class SandboxBackendTool(Tool):
+    name = "sandbox_backend"
+    description = "List available sandbox execution backends (e.g. ssh, docker) and which one is currently active, or switch the active backend for this user."
+    parameters = {"type": "object", "properties": {"action": {"enum": ["list", "switch"]}, "backend_name": {"type": "string"}}, "required": ["action"]}
+    requires_user_context = True
+
+    def __init__(self, backend_registry: SandboxBackendRegistry) -> None: ...
+    async def run(self, action: str, backend_name: str | None = None, _user_id: str | None = None) -> ToolResult: ...
+```
+
+**Internal implementation notes:**
+- `action="list"`: checks availability on all backends concurrently via `asyncio.gather`, returns formatted list showing which is active for the user.
+- `action="switch"`: validates and persists the new backend preference via `registry.set_active_backend()`. Even offline backends can be selected (for future use).
+- Uses `requires_user_context = True` so `ToolRegistry.execute()` injects the trusted `_user_id`.
+- LLM-supplied `_user_id` is overridden by trusted value (fail-closed security).
+
+**Acceptance criteria:**
+- `action="list"` returns all registered backends with availability status.
+- `action="list"` marks the active backend with `(active)`.
+- `action="switch"` persists the new preference and reports success.
+- `action="switch"` to offline backend succeeds but reports `(offline)`.
+- `action="switch"` to unregistered backend returns error with valid options.
+- Unregistered backend raises `ValueError`, caught and returned as `ToolResult(success=False)`.
+
+**Manual testing steps:**
+1. Run `uv run pytest tests/test_tools/test_sandbox_backend.py -v` to verify all tests pass.
+
+**Suggested pytest tests:**
+- `tests/test_tools/test_sandbox_backend.py::test_list_backends_shows_all_registered_backends`
+- `tests/test_tools/test_sandbox_backend.py::test_list_backends_marks_active_backend`
+- `tests/test_tools/test_sandbox_backend.py::test_list_backends_marks_default_as_active_when_no_preference`
+- `tests/test_tools/test_sandbox_backend.py::test_list_backends_checks_availability_concurrently`
+- `tests/test_tools/test_sandbox_backend.py::test_list_backends_uses_stored_preference_not_fallback`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_backend_to_valid_backend`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_backend_to_online_backend_reports_online`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_backend_to_offline_backend_reports_offline`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_backend_to_unregistered_returns_error`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_backend_requires_backend_name`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_persists_and_list_shows_changed_backend`
+- `tests/test_tools/test_sandbox_backend.py::test_switch_uses_trusted_user_id`
+- `tests/test_tools/test_sandbox_backend.py::test_unknown_action_returns_error`
+
+**Suggested Git commit message:** `tools: add sandbox_backend tool for listing and switching backends`
+
+**Dependencies on previous batches:** Batch 41 (SandboxBackendRegistry), Batch 15 (Tool interface).
 
 ---
 
