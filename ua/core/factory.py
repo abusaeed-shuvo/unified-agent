@@ -92,9 +92,13 @@ def build_default_agent(
     # Always register sandbox tools (they fail closed internally if unconfigured)
     # This is different from FilesystemTool which is skipped due to auto-discovery
     # TypeError - these tools are wired explicitly, not auto-discovered.
+    from ua.tools.sandbox_backend import SandboxBackendTool
     from ua.tools.sandbox_execute import SandboxExecuteTool
     from ua.tools.sandbox_write_file import SandboxWriteFileTool
 
+    tool_registry.register_instance(
+        SandboxBackendTool(backend_registry=backend_registry)
+    )
     tool_registry.register_instance(
         SandboxWriteFileTool(backend_registry=backend_registry)
     )

@@ -39,7 +39,7 @@ class SandboxBackendRegistry:
 
         Args:
             backends: Dict mapping backend_name to SandboxManager instance.
-                     Expected keys: "ssh", "docker" (or any future backends).
+                       Expected keys: "ssh", "docker" (or any future backends).
             memory: MemoryManager for persisting/retrieving per-user preferences.
             settings: Settings object for default_backend and fallback_order config.
         """
@@ -128,6 +128,22 @@ class SandboxBackendRegistry:
             )
 
         await self._memory.remember_fact(user_id, "active_sandbox_backend", backend_name)
+
+    async def get_stored_preference(self, user_id: str) -> str:
+        """Return the user's stored backend preference without fallback logic.
+
+        This is the same lookup resolve() does internally for the first step,
+        but factored out so tools can show the user's actual preference without
+        invoking fallback logic.
+
+        Args:
+            user_id: The user identifier.
+
+        Returns:
+            The stored backend name, or the default if none is stored.
+        """
+        stored = await self._memory.get_fact(user_id, "active_sandbox_backend")
+        return stored or self._settings.sandbox_default_backend
 
     def registered_backends(self) -> list[str]:
         """Return the list of registered backend_name values.

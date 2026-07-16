@@ -32,6 +32,40 @@ async def _prompt_confirmation(command: str, reason: str) -> bool:
         return False
 
 
+async def _get_backend_status(agent) -> str:
+    """Get backend status string for CLI startup banner.
+
+    Best-effort with short timeout to avoid hanging CLI startup.
+
+    Args:
+        agent: The UnifiedAgent instance.
+
+    Returns:
+        A string like " Sandbox backends available: ssh (online), docker (offline)"
+        or empty string if status check fails.
+    """
+    try:
+        # Use a short timeout for the status check
+        result = await asyncio.wait_for(
+            agent._tool_registry.execute("sandbox_backend", user_id="cli-startup", action="list"),
+            timeout=2.0,
+        )
+        if result.success:
+            # Parse the output to extract backend statuses
+            lines = result.output.strip().split("\n")
+            backend_parts = []
+            for line in lines[1:]:  # Skip the header line
+                # Parse "  - ssh: online (active)" format
+                if "- " in line:
+                    backend_parts.append(line.strip()[2:])  # Remove "- " prefix
+            if backend_parts:
+                return f" Sandbox backends available: {', '.join(backend_parts)}"
+    except (asyncio.TimeoutError, Exception):
+        # Silently fail - don't crash or hang CLI startup
+        pass
+    return ""
+
+
 def run() -> None:
     """Synchronous entrypoint for the CLI.
 
@@ -53,7 +87,12 @@ def run() -> None:
 
         # Build agent with confirmation callback for risky commands
         agent = build_default_agent(confirmation_callback=_prompt_confirmation)
-        print("Unified Agent CLI ready. Press Ctrl+D or enter an empty line to quit.")
+        
+        # Get backend info for startup banner (best-effort, with timeout to avoid hanging)
+        backend_info = await _get_backend_status(agent)
+        
+        print("Unified Agent CLI ready." + backend_info)
+        print("Press Ctrl+D or enter an empty line to quit.")
 
         while True:
             try:
